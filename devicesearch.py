@@ -25,6 +25,20 @@ def resource_path(filename):
         return os.path.join(sys._MEIPASS, filename)
     return os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), filename)
 
+def show_messagebox_with_icon(parent, icon_type, title, text, buttons=QMessageBox.Ok):
+    # 共用訊息視窗，icon於.py同目錄
+    if hasattr(sys, "_MEIPASS"):
+        icon_path = os.path.join(sys._MEIPASS, "tonnet_icon.ico")
+    else:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tonnet_icon.ico")
+    box = QMessageBox(parent)
+    box.setWindowIcon(QIcon(icon_path))
+    box.setIcon(icon_type)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setStandardButtons(buttons)
+    return box.exec_()
+
 def check_npcap_installed():
     try:
         import winreg
@@ -134,7 +148,6 @@ class ARPMonitorApp(QWidget):
             raw_mac = pkt[ARP].hwsrc.upper()
             mac_no_colon = raw_mac.replace(":", "")
             oui = mac_no_colon[:6]
-            # 增加 MAC 為全 0 也查詢 device info
             if (oui in OUI_LIST) or (mac_no_colon == "000000000000"):
                 if raw_mac not in self.seen_mac:
                     self.seen_mac.add(raw_mac)
@@ -162,7 +175,7 @@ class ARPMonitorApp(QWidget):
                         data.get("dev_ip", ip),
                         data.get("dev_mac", mac)
                     )
-            except Exception as e:
+            except Exception:
                 continue
         return None, None, None
 
@@ -200,7 +213,11 @@ class ARPMonitorApp(QWidget):
         except Exception as e:
             import traceback
             error_detail = traceback.format_exc()
-            QMessageBox.critical(self, "錯誤", f"封包監聽失敗：\n{e}\n{error_detail}")
+            show_messagebox_with_icon(
+                self, QMessageBox.Critical, "錯誤",
+                f"封包監聽失敗：\n{e}\n{error_detail}",
+                buttons=QMessageBox.Ok
+            )
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
 
@@ -209,7 +226,9 @@ class ARPMonitorApp(QWidget):
             self.stop_sniffing()
         display_name = self.iface_combo.currentText()
         if not display_name:
-            QMessageBox.critical(self, "錯誤", "請選擇一張網卡！")
+            show_messagebox_with_icon(
+                self, QMessageBox.Critical, "錯誤", "請選擇一張網卡！", buttons=QMessageBox.Ok
+            )
             return
         iface = self.iface_mapping[display_name]
         self.start_btn.setEnabled(False)
@@ -241,7 +260,9 @@ class ARPMonitorApp(QWidget):
 
     def export_excel(self):
         if self.table.rowCount() == 0:
-            QMessageBox.information(self, "匯出", "目前沒有資料可匯出。")
+            show_messagebox_with_icon(
+                self, QMessageBox.Information, "匯出", "目前沒有資料可匯出。", buttons=QMessageBox.Ok
+            )
             return
         default_name = f"Devices_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path, _ = QFileDialog.getSaveFileName(
@@ -255,17 +276,29 @@ class ARPMonitorApp(QWidget):
                 items = [self.table.item(row, col).text() for col in range(self.table.columnCount())]
                 ws.append(items)
             wb.save(path)
-            QMessageBox.information(self, "成功", "資料已成功匯出為 Excel 檔案！")
+            show_messagebox_with_icon(
+                self, QMessageBox.Information, "成功", "資料已成功匯出為 Excel 檔案！", buttons=QMessageBox.Ok
+            )
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     if not check_npcap_installed():
-        QMessageBox.critical(None, "缺少元件", "本程式需安裝 Npcap (或 WinPcap) 才能使用！\n\n請至 https://nmap.org/npcap/ 下載安裝後再執行。")
+        show_messagebox_with_icon(
+            None, QMessageBox.Critical, "缺少元件",
+            "本程式需安裝 Npcap (或 WinPcap) 才能使用！\n\n請至 https://nmap.org/npcap/ 下載安裝後再執行。",
+            buttons=QMessageBox.Ok
+        )
         sys.exit()
 
     if not is_admin():
-        ret = QMessageBox.question(None, "權限不足", "建議用「系統管理員」身份執行本程式。\n\n是否要繼續執行？", QMessageBox.Yes | QMessageBox.No)
+        ret = show_messagebox_with_icon(
+            None,
+            QMessageBox.Question,
+            "權限不足",
+            "建議用「系統管理員」身份執行本程式。\n\n是否要繼續執行？",
+            buttons=QMessageBox.Yes | QMessageBox.No
+        )
         if ret == QMessageBox.No:
             sys.exit()
 
