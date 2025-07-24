@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QComboBox, QTableWidget, QTableWidgetItem,
     QFileDialog, QMessageBox, QHeaderView
 )
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QColor
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 from scapy.all import sniff, ARP
@@ -21,7 +21,6 @@ OUI_LIST = ["5895D8", "000246"]
 DEVICE_PORTS = [3377, 80, 8080]
 
 def resource_path(filename):
-    # 支援 py、EXE 與 PyInstaller 打包後資源路徑
     if hasattr(sys, "_MEIPASS"):
         return os.path.join(sys._MEIPASS, filename)
     return os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), filename)
@@ -65,8 +64,6 @@ class ARPMonitorApp(QWidget):
         super().__init__()
         self.setWindowTitle("HA_IP搜尋工具_V2.0_By Dean")
         self.resize(750, 480)
-
-        # 視窗icon，py和exe都能正常顯示
         self.setWindowIcon(QIcon(resource_path("tonnet_icon.ico")))
 
         self.iface_mapping = self.get_interface_mapping()
@@ -75,10 +72,8 @@ class ARPMonitorApp(QWidget):
         self.sniffer_thread = None
         self.sniffer_stop_event = threading.Event()
 
-        # UI Layout
         main_layout = QVBoxLayout()
 
-        # 網卡選擇
         hbox_iface = QHBoxLayout()
         hbox_iface.addWidget(QLabel("選擇網卡："))
         self.iface_combo = QComboBox()
@@ -87,7 +82,6 @@ class ARPMonitorApp(QWidget):
         hbox_iface.addStretch()
         main_layout.addLayout(hbox_iface)
 
-        # 按鈕
         hbox_btn = QHBoxLayout()
         self.start_btn = QPushButton("開始檢查")
         self.stop_btn = QPushButton("停止")
@@ -101,11 +95,9 @@ class ARPMonitorApp(QWidget):
         hbox_btn.addStretch()
         main_layout.addLayout(hbox_btn)
 
-        # 狀態
         self.device_count_label = QLabel("目前偵測到設備數量：0")
         main_layout.addWidget(self.device_count_label)
 
-        # 資料表格
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["型號", "IP", "MAC"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -114,7 +106,6 @@ class ARPMonitorApp(QWidget):
 
         self.setLayout(main_layout)
 
-        # 事件綁定
         self.start_btn.clicked.connect(self.start_sniffing)
         self.stop_btn.clicked.connect(self.stop_sniffing)
         self.clear_btn.clicked.connect(self.clear_data)
@@ -122,7 +113,6 @@ class ARPMonitorApp(QWidget):
         self.iface_combo.currentIndexChanged.connect(self.interface_changed)
         self.add_row_signal.connect(self.append_row)
 
-        # 定時更新
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_device_count)
 
@@ -177,13 +167,23 @@ class ARPMonitorApp(QWidget):
         return None, None, None
 
     def append_row(self, model, ip, mac):
-        ip = ip.split(':')[0]  # 不顯示:port
-        mac = mac.upper()      # MAC 統一大寫
+        ip = ip.split(':')[0]
+        mac = mac.upper()
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(model))
-        self.table.setItem(row, 1, QTableWidgetItem(ip))
-        self.table.setItem(row, 2, QTableWidgetItem(mac))
+        item_model = QTableWidgetItem(model)
+        item_ip = QTableWidgetItem(ip)
+        item_mac = QTableWidgetItem(mac)
+
+        mac_no_colon = mac.replace(":", "")
+        # 紅色條件：OUI為0、後6碼為0、或全為0
+        if (mac_no_colon[:6] == "000000") or (mac_no_colon[-6:] == "000000") or (mac_no_colon == "000000000000"):
+            for item in [item_model, item_ip, item_mac]:
+                item.setForeground(QColor("red"))
+
+        self.table.setItem(row, 0, item_model)
+        self.table.setItem(row, 1, item_ip)
+        self.table.setItem(row, 2, item_mac)
         self.update_device_count()
 
     def sniff_arp(self, iface):
@@ -205,7 +205,6 @@ class ARPMonitorApp(QWidget):
             self.stop_btn.setEnabled(False)
 
     def start_sniffing(self):
-        # 若已在 sniff，先停掉
         if self.sniffing:
             self.stop_sniffing()
         display_name = self.iface_combo.currentText()
@@ -261,12 +260,10 @@ class ARPMonitorApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # 1. 檢查是否安裝 Npcap
     if not check_npcap_installed():
         QMessageBox.critical(None, "缺少元件", "本程式需安裝 Npcap (或 WinPcap) 才能使用！\n\n請至 https://nmap.org/npcap/ 下載安裝後再執行。")
         sys.exit()
 
-    # 2. 檢查是否有管理員權限
     if not is_admin():
         ret = QMessageBox.question(None, "權限不足", "建議用「系統管理員」身份執行本程式。\n\n是否要繼續執行？", QMessageBox.Yes | QMessageBox.No)
         if ret == QMessageBox.No:
