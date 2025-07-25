@@ -207,7 +207,7 @@ class DeviceCheckerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         icon_path = resource_path("tonnet_icon.ico")
-        print("icon 路徑:", icon_path, "存在？", os.path.exists(icon_path))
+        #print("icon 路徑:", icon_path, "存在？", os.path.exists(icon_path))
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("設備狀況收集工具_V1.0_By Dean")
@@ -565,7 +565,7 @@ class DeviceCheckerApp(QMainWindow):
                 QMessageBox.warning(
                     self, "注意",
                     "本機 IP 不屬於任何設備資料的**精確網段**，但與部分設備的**大網段有重疊**。\n"
-                    "這通常表示子網掩碼設定不同，有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
+                    "有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
                 )
             else:
                 QMessageBox.critical(self, "錯誤", "本機 IP 不屬於任何設備資料的網段！\n請確認電腦網卡設定或 VPN 狀態。")
