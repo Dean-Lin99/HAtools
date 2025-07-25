@@ -38,9 +38,10 @@ class DeviceCheckThread(QThread):
         self._is_running = False
 
     async def fetch_device_info(self, session, ip):
+        timeout = aiohttp.ClientTimeout(total=3)  # ← 修改點：timeout 3 秒
         for port in [8080, 80, 3377]:
             try:
-                async with session.get(f"http://{ip}:{port}/device/info", timeout=1) as r:
+                async with session.get(f"http://{ip}:{port}/device/info", timeout=timeout) as r:
                     if r.status == 200 and r.headers.get("Content-Type", "").startswith("application/json"):
                         return await r.json()
             except:
@@ -472,6 +473,7 @@ class DeviceCheckerApp(QMainWindow):
         self.btn_stop.setEnabled(True)
 
     def run_check(self, rows):
+        self.stop_check()  # ← 修改點：防止重複 Thread 疊加
         self.results = []
         self.result_map = {}
         self.result_table.setRowCount(0)
