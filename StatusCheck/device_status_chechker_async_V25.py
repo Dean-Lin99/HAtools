@@ -7,7 +7,9 @@ import pandas as pd
 from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+import psutil
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
@@ -16,12 +18,90 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QIcon, QIntValidator
 
-# --- 支援打包後/開發直接執行的 icon 資源路徑 ---
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
-# ------------------------------------------------
+
+def get_local_ipv4_networks():
+    networks = []
+    for iface, addrs in psutil.net_if_addrs().items():
+        skip = False
+        for addr in addrs:
+            if addr.family == 2:
+                ip = addr.address
+                if ip.startswith("127.") or ip.startswith("169.254.") or ip == "0.0.0.0":
+                    skip = True
+        if skip:
+            continue
+        for addr in addrs:
+            if addr.family == 2:
+                ip = addr.address
+                netmask = addr.netmask
+                if ip and netmask and ip != "127.0.0.1":
+                    try:
+                        network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
+                        networks.append(network)
+                    except Exception:
+                        pass
+    return networks
+
+def get_local_ipv4_masks():
+    masks = set()
+    for iface, addrs in psutil.net_if_addrs().items():
+        skip = False
+        for addr in addrs:
+            if addr.family == 2:
+                ip = addr.address
+                if ip.startswith("127.") or ip.startswith("169.254.") or ip == "0.0.0.0":
+                    skip = True
+        if skip:
+            continue
+        for addr in addrs:
+            if addr.family == 2:
+                netmask = addr.netmask
+                if netmask and netmask != "255.255.255.255":
+                    masks.add(netmask)
+    return masks
+
+def get_local_ipv4_addresses():
+    ips = set()
+    for iface, addrs in psutil.net_if_addrs().items():
+        skip = False
+        for addr in addrs:
+            if addr.family == 2:
+                ip = addr.address
+                if ip.startswith("127.") or ip.startswith("169.254.") or ip == "0.0.0.0":
+                    skip = True
+        if skip:
+            continue
+        for addr in addrs:
+            if addr.family == 2:
+                ip = addr.address
+                ips.add(ip)
+    return ips
+
+def any_ip_in_local_network(ip_list, local_networks):
+    for ip in ip_list:
+        try:
+            ip_addr = ipaddress.IPv4Address(ip)
+            if any(ip_addr in net for net in local_networks):
+                return True
+        except Exception:
+            continue
+    return False
+
+def has_overlap(ip_list, local_networks):
+    for ip in ip_list:
+        try:
+            ip_addr = ipaddress.IPv4Address(ip)
+            for net in local_networks:
+                ip_net = ipaddress.IPv4Network(f"{ip}/{net.prefixlen}", strict=False)
+                if net.overlaps(ip_net):
+                    return True
+        except Exception:
+            continue
+    return False
 
 class DeviceCheckThread(QThread):
     progress_signal = pyqtSignal(int, int)
@@ -38,7 +118,7 @@ class DeviceCheckThread(QThread):
         self._is_running = False
 
     async def fetch_device_info(self, session, ip):
-        timeout = aiohttp.ClientTimeout(total=3)  # ← 修改點：timeout 3 秒
+        timeout = aiohttp.ClientTimeout(total=3)
         for port in [8080, 80, 3377]:
             try:
                 async with session.get(f"http://{ip}:{port}/device/info", timeout=timeout) as r:
@@ -136,6 +216,7 @@ class DeviceCheckerApp(QMainWindow):
         self.original_data = pd.DataFrame()
         self.results = []
         self.result_map = {}
+        self.device_masks = set()
         self.only_show_abnormal = False
         self.only_show_normal = False
         self.check_thread = None
@@ -277,22 +358,30 @@ class DeviceCheckerApp(QMainWindow):
         except Exception:
             return False
 
-    def find_ip_name_type_column(self, df):
+    def find_ip_name_type_mask_column(self, df):
         for i in range(2, len(df.columns)):
             type_col = df.iloc[:, i - 2]
             name_col = df.iloc[:, i - 1]
             ip_col = df.iloc[:, i]
+            mask_col = None
+            if i+1 < len(df.columns):
+                mask_col = df.iloc[:, i+1]
             valid_count = 0
             for dev_type, name, ip in zip(type_col, name_col, ip_col):
                 if self.is_valid_ip(ip, name=name):
                     valid_count += 1
             if valid_count > 5:
-                return pd.DataFrame({
-                    "type": type_col,
-                    "name": name_col,
-                    "ip": ip_col
-                })
-        return pd.DataFrame()
+                mask_vals = []
+                if mask_col is not None:
+                    for v in mask_col:
+                        v = str(v).strip()
+                        if v and all(c in "0123456789." for c in v) and len(v.split('.')) == 4:
+                            mask_vals.append(v)
+                return (
+                    pd.DataFrame({"type": type_col, "name": name_col, "ip": ip_col}),
+                    set(mask_vals)
+                )
+        return pd.DataFrame(), set()
 
     def load_excel(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "選擇 Excel 檔", "", "Excel Files (*.xlsx *.xls)")
@@ -301,7 +390,8 @@ class DeviceCheckerApp(QMainWindow):
         xls = pd.ExcelFile(file_path)
         sheet = "貼紙印製" if "貼紙印製" in xls.sheet_names else xls.sheet_names[0]
         df_raw = pd.read_excel(file_path, sheet_name=sheet, header=None)
-        df = self.find_ip_name_type_column(df_raw)
+        df, mask_set = self.find_ip_name_type_mask_column(df_raw)
+        self.device_masks = mask_set
         if df.empty:
             QMessageBox.critical(self, "錯誤", "無法辨識設備資料，請確認欄位格式")
             return
@@ -396,6 +486,7 @@ class DeviceCheckerApp(QMainWindow):
         self.original_data = pd.DataFrame()
         self.results = []
         self.result_map = {}
+        self.device_masks = set()
         self.top_table.setRowCount(0)
         self.result_table.setRowCount(0)
         self.status_label.setText("資料已清除")
@@ -436,6 +527,49 @@ class DeviceCheckerApp(QMainWindow):
         if self.original_data.empty:
             QMessageBox.warning(self, "提示", "請先匯入設備資料")
             return
+        # 檢查本機IP有無與設備IP重複（可選擇繼續或停止）
+        local_ips = get_local_ipv4_addresses()
+        ip_list = set(self.original_data['ip'])
+        overlap = local_ips & ip_list
+        if overlap:
+            reply = QMessageBox.question(
+                self, "IP重複警告",
+                f"本機 IP（{', '.join(overlap)}）與資料內設備 IP 重複！\n請更換本機 IP 或修正設備設定。\n\n要繼續檢查嗎？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        # mask一致性檢查
+        local_masks = get_local_ipv4_masks()
+        if self.device_masks and not self.device_masks.intersection(local_masks):
+            msg = (
+                f"資料內設備子網掩碼為：{', '.join(self.device_masks)}\n"
+                f"本機網卡子網掩碼為：{', '.join(local_masks)}\n"
+                "設備網段設置與本機不同，請再次確認！\n\n"
+                "要繼續檢查嗎？"
+            )
+            reply = QMessageBox.question(
+                self, "注意",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        # 網段判斷
+        local_networks = get_local_ipv4_networks()
+        ip_list = list(self.original_data['ip'])
+        if not any_ip_in_local_network(ip_list, local_networks):
+            if has_overlap(ip_list, local_networks):
+                QMessageBox.warning(
+                    self, "注意",
+                    "本機 IP 不屬於任何設備資料的**精確網段**，但與部分設備的**大網段有重疊**。\n"
+                    "這通常表示子網掩碼設定不同，有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
+                )
+            else:
+                QMessageBox.critical(self, "錯誤", "本機 IP 不屬於任何設備資料的網段！\n請確認電腦網卡設定或 VPN 狀態。")
+                return
         df = self.get_filtered_top_data()
         if df.empty:
             QMessageBox.warning(self, "提示", "找不到符合搜尋條件的設備")
@@ -459,11 +593,53 @@ class DeviceCheckerApp(QMainWindow):
         except ValueError:
             QMessageBox.warning(self, "提示", "請正確輸入區間行號")
             return
+        partial = self.original_data.iloc[start-1:end]
+        # 檢查本機IP有無與區間設備IP重複（可選擇繼續或停止）
+        local_ips = get_local_ipv4_addresses()
+        ip_list = set(partial['ip'])
+        overlap = local_ips & ip_list
+        if overlap:
+            reply = QMessageBox.question(
+                self, "IP重複警告",
+                f"本機 IP（{', '.join(overlap)}）與區間設備 IP 重複！\n請更換本機 IP 或修正設備設定。\n\n要繼續檢查嗎？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        # mask一致性檢查
+        local_masks = get_local_ipv4_masks()
+        if self.device_masks and not self.device_masks.intersection(local_masks):
+            msg = (
+                f"資料內設備子網掩碼為：{', '.join(self.device_masks)}\n"
+                f"本機網卡子網掩碼為：{', '.join(local_masks)}\n"
+                "設備網段設置與本機不同，請再次確認！\n\n"
+                "要繼續檢查嗎？"
+            )
+            reply = QMessageBox.question(
+                self, "注意",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        local_networks = get_local_ipv4_networks()
+        ip_list = list(partial['ip'])
+        if not any_ip_in_local_network(ip_list, local_networks):
+            if has_overlap(ip_list, local_networks):
+                QMessageBox.warning(
+                    self, "注意",
+                    "本機 IP 不屬於任何區間設備資料的**精確網段**，但與部分設備的**大網段有重疊**。\n"
+                    "這通常表示子網掩碼設定不同，有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
+                )
+            else:
+                QMessageBox.critical(self, "錯誤", "本機 IP 不屬於任何區間設備資料的網段！\n請確認電腦網卡設定或 VPN 狀態。")
+                return
         if not (1 <= start <= end <= len(self.original_data)):
             QMessageBox.warning(self, "提示", f"行號範圍需為 1~{len(self.original_data)}，且開始<=結束")
             return
         self.stop_check()
-        partial = self.original_data.iloc[start-1:end]
         rows = list(partial.to_dict(orient="records")) + [
             {"index": 0, "type": "", "name": "原廠IP設備", "ip": "192.168.200.254"}
         ]
@@ -473,7 +649,7 @@ class DeviceCheckerApp(QMainWindow):
         self.btn_stop.setEnabled(True)
 
     def run_check(self, rows):
-        self.stop_check()  # ← 修改點：防止重複 Thread 疊加
+        self.stop_check()
         self.results = []
         self.result_map = {}
         self.result_table.setRowCount(0)
