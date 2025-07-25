@@ -5,3 +5,9 @@ __pycache__/
 *.exe
 *.dll
 *.zip
+*.xls
+*.xlsx
+*.db
+*.doc
+*.docx
+*.pdf
