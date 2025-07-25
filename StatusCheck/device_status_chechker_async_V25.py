@@ -544,8 +544,8 @@ class DeviceCheckerApp(QMainWindow):
         local_masks = get_local_ipv4_masks()
         if self.device_masks and not self.device_masks.intersection(local_masks):
             msg = (
-                f"資料內設備子網掩碼為：{', '.join(self.device_masks)}\n"
-                f"本機網卡子網掩碼為：{', '.join(local_masks)}\n"
+                f"資料內設備子網路遮罩為：{', '.join(self.device_masks)}\n"
+                f"本機網卡子網路遮罩為：{', '.join(local_masks)}\n"
                 "設備網段設置與本機不同，請再次確認！\n\n"
                 "要繼續檢查嗎？"
             )
@@ -611,8 +611,8 @@ class DeviceCheckerApp(QMainWindow):
         local_masks = get_local_ipv4_masks()
         if self.device_masks and not self.device_masks.intersection(local_masks):
             msg = (
-                f"資料內設備子網掩碼為：{', '.join(self.device_masks)}\n"
-                f"本機網卡子網掩碼為：{', '.join(local_masks)}\n"
+                f"資料內設備子網路遮罩為：{', '.join(self.device_masks)}\n"
+                f"本機網卡子網路遮罩為：{', '.join(local_masks)}\n"
                 "設備網段設置與本機不同，請再次確認！\n\n"
                 "要繼續檢查嗎？"
             )
@@ -631,7 +631,7 @@ class DeviceCheckerApp(QMainWindow):
                 QMessageBox.warning(
                     self, "注意",
                     "本機 IP 不屬於任何區間設備資料的**精確網段**，但與部分設備的**大網段有重疊**。\n"
-                    "這通常表示子網掩碼設定不同，有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
+                    "有可能導致部分設備無法連通，請再三確認本機網卡設定及現場網段規劃。"
                 )
             else:
                 QMessageBox.critical(self, "錯誤", "本機 IP 不屬於任何區間設備資料的網段！\n請確認電腦網卡設定或 VPN 狀態。")
