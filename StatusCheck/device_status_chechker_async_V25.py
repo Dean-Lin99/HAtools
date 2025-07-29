@@ -337,7 +337,7 @@ class DeviceCheckerApp(QMainWindow):
         try:
             ipstr = str(s).strip()
             name = str(name).lower()
-            for badword in ["mask", "掩碼", "gateway", "網關", "gw", "router", "default gateway"]:
+            for badword in ["mask", "遮罩", "gateway", "網關", "gw", "router", "default gateway"]:
                 if badword in name:
                     return False
             ip = ipaddress.ip_address(ipstr)
