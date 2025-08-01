@@ -26,7 +26,6 @@ def resource_path(filename):
     return os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), filename)
 
 def show_messagebox_with_icon(parent, icon_type, title, text, buttons=QMessageBox.Ok):
-    # 共用訊息視窗，icon於.py同目錄
     if hasattr(sys, "_MEIPASS"):
         icon_path = os.path.join(sys._MEIPASS, "tonnet_icon.ico")
     else:
@@ -91,7 +90,8 @@ class ARPMonitorApp(QWidget):
         hbox_iface = QHBoxLayout()
         hbox_iface.addWidget(QLabel("選擇網卡："))
         self.iface_combo = QComboBox()
-        self.iface_combo.addItems(list(self.iface_mapping.keys()))
+        if self.iface_mapping:
+            self.iface_combo.addItems(list(self.iface_mapping.keys()))
         hbox_iface.addWidget(self.iface_combo)
         hbox_iface.addStretch()
         main_layout.addLayout(hbox_iface)
@@ -135,8 +135,13 @@ class ARPMonitorApp(QWidget):
         for nic, addrs in psutil.net_if_addrs().items():
             desc = nic
             for addr in addrs:
-                if getattr(addr, 'family', None).name == 'AF_LINK':
+                # 有些版本會是 socket.AF_PACKET 或 AF_LINK
+                if getattr(addr, 'family', None) == getattr(psutil, 'AF_LINK', None) or \
+                   (getattr(addr, 'family', None) and str(getattr(addr, 'family')) == 'AddressFamily.AF_PACKET'):
                     mapping[f"{desc} ({nic})"] = nic
+        # 萬一一張都沒有，直接加一個空選項
+        if not mapping:
+            mapping["無可用網卡"] = ""
         return mapping
 
     def update_device_count(self):
@@ -207,7 +212,7 @@ class ARPMonitorApp(QWidget):
                 filter="arp",
                 prn=self.handle_arp,
                 store=0,
-                iface=iface,
+                iface=iface if iface else None,
                 stop_filter=lambda _: (not self.sniffing) or self.sniffer_stop_event.is_set()
             )
         except Exception as e:
@@ -225,7 +230,7 @@ class ARPMonitorApp(QWidget):
         if self.sniffing:
             self.stop_sniffing()
         display_name = self.iface_combo.currentText()
-        if not display_name:
+        if not display_name or not self.iface_mapping.get(display_name):
             show_messagebox_with_icon(
                 self, QMessageBox.Critical, "錯誤", "請選擇一張網卡！", buttons=QMessageBox.Ok
             )
@@ -246,8 +251,7 @@ class ARPMonitorApp(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.timer.stop()
-        if self.sniffer_thread is not None and self.sniffer_thread.is_alive():
-            self.sniffer_thread.join(timeout=1)
+        # 不強制 join，daemon thread 結束即可
 
     def interface_changed(self):
         self.stop_sniffing()
@@ -269,6 +273,8 @@ class ARPMonitorApp(QWidget):
             self, "儲存 Excel", default_name, "Excel 檔案 (*.xlsx)"
         )
         if path:
+            if not path.lower().endswith('.xlsx'):
+                path += '.xlsx'
             wb = Workbook()
             ws = wb.active
             ws.append(["型號", "IP", "MAC"])
