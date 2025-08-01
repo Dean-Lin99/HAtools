@@ -156,7 +156,7 @@ class ARPMonitorApp(QWidget):
     def query_and_add_device(self, ip, mac):
         model, real_ip, real_mac = self.query_device_info(ip, mac)
         if not model:
-            model = "未知/無回應"
+            model = "Tonnet/不在同一網段"
         if not real_ip:
             real_ip = ip
         if not real_mac:
