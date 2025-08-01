@@ -52,16 +52,19 @@ def check_npcap_installed():
         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\WinPcapInst",
     ]
     found = False
-    for root in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
-        for path in reg_paths:
-            try:
-                with winreg.OpenKey(root, path):
-                    found = True
-                    break
-            except Exception:
-                pass
-        if found:
-            break
+    try:
+        for root in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+            for path in reg_paths:
+                try:
+                    with winreg.OpenKey(root, path):
+                        found = True
+                        break
+                except Exception:
+                    pass
+            if found:
+                break
+    except Exception:
+        return False
     return found
 
 def is_admin():
@@ -135,11 +138,9 @@ class ARPMonitorApp(QWidget):
         for nic, addrs in psutil.net_if_addrs().items():
             desc = nic
             for addr in addrs:
-                # 有些版本會是 socket.AF_PACKET 或 AF_LINK
                 if getattr(addr, 'family', None) == getattr(psutil, 'AF_LINK', None) or \
                    (getattr(addr, 'family', None) and str(getattr(addr, 'family')) == 'AddressFamily.AF_PACKET'):
                     mapping[f"{desc} ({nic})"] = nic
-        # 萬一一張都沒有，直接加一個空選項
         if not mapping:
             mapping["無可用網卡"] = ""
         return mapping
@@ -194,7 +195,6 @@ class ARPMonitorApp(QWidget):
         item_mac = QTableWidgetItem(mac)
 
         mac_no_colon = mac.replace(":", "")
-        # 紅色條件：OUI為0、後6碼為0、或全為0
         if (mac_no_colon[:6] == "000000") or (mac_no_colon[-6:] == "000000") or (mac_no_colon == "000000000000"):
             for item in [item_model, item_ip, item_mac]:
                 item.setForeground(QColor("red"))
@@ -251,7 +251,6 @@ class ARPMonitorApp(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.timer.stop()
-        # 不強制 join，daemon thread 結束即可
 
     def interface_changed(self):
         self.stop_sniffing()
@@ -289,12 +288,22 @@ class ARPMonitorApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
+    # Npcap 手動安裝提示（無 silent install）
     if not check_npcap_installed():
         show_messagebox_with_icon(
             None, QMessageBox.Critical, "缺少元件",
-            "本程式需安裝 Npcap (或 WinPcap) 才能使用！\n\n請至 https://nmap.org/npcap/ 下載安裝後再執行。",
+            "本程式需安裝 Npcap (或 WinPcap) 才能使用！\n\n"
+            "請先安裝本資料夾內的 npcap 安裝檔（npcap-xxx.exe），\n"
+            "或至 https://npcap.com/ 下載最新版本。\n\n"
+            "安裝完成後請重新啟動本程式。",
             buttons=QMessageBox.Ok
         )
+        # 自動開啟目前程式資料夾，讓用戶可以直接點安裝檔
+        folder = os.path.dirname(os.path.abspath(sys.argv[0]))
+        try:
+            os.startfile(folder)
+        except Exception:
+            pass
         sys.exit()
 
     if not is_admin():
