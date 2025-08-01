@@ -28,3 +28,4 @@ __pycache__/
 *.tar.bak
 *.tar.bz2
 *.pkg
+*.pdf
