@@ -32,7 +32,7 @@ def is_ipv4(ip):
     if ip.lower() in ['mask', 'gateway', 'gw', 'subnet', 'netmask']:
         return False
     blacklist = [
-        '255.255.255.255', '255.255.255.0', '255.0.0.0', '0.0.0.0', '127.0.0.1', '255.255.248.0', '224.0.0.1', '192.168.200.3', '255.255.224.0'
+        '255.255.255.255', '255.255.255.0', '255.0.0.0', '0.0.0.0', '127.0.0.1', '255.255.248.0', '224.0.0.1', '255.255.224.0'
     ]
     if ip in blacklist:
         return False
@@ -65,7 +65,7 @@ class PasswordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("密碼驗證")
-        self.setWindowIcon(QIcon(get_icon("main.ico")))
+        self.setWindowIcon(QIcon(get_icon("tonnet_icon.png")))
         self.setModal(True)
         self.pwd_input = QLineEdit()
         self.pwd_input.setEchoMode(QLineEdit.Password)
@@ -158,7 +158,7 @@ class RebootGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HA設備重啟工具_V1.0_By Dean")
-        self.setWindowIcon(QIcon(get_icon("main.ico")))
+        self.setWindowIcon(QIcon(get_icon("tonnet_icon.png")))
 
         screen = QApplication.primaryScreen()
         size = screen.size()
@@ -330,7 +330,7 @@ class RebootGUI(QWidget):
             ip_set = set(x["ip"] for x in self.all_ip_list)  # 現有IP，避免重覆
             result_list = []
             if use_full_info:
-                # 依照每一列自動找 IP，抓左邊兩格
+                # 依照每一列自動找 IP，抓左邊兩格，排除設備類型為管理中心
                 for i, row in target_df.iterrows():
                     row = list(row)
                     for idx in range(len(row)):
@@ -339,7 +339,7 @@ class RebootGUI(QWidget):
                             ip = cell
                             name = str(row[idx - 1]).strip() if idx - 1 >= 0 else ""
                             devtype = str(row[idx - 2]).strip() if idx - 2 >= 0 else ""
-                            if ip not in ip_set:
+                            if ip not in ip_set and devtype != "管理中心":
                                 result_list.append({"name": name, "devtype": devtype, "ip": ip})
                                 ip_set.add(ip)
                             break   # 每列只抓一組IP
