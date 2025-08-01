@@ -29,3 +29,8 @@ __pycache__/
 *.tar.bz2
 *.pkg
 *.pdf
+*.ico
+*.png
+*.jpg
+*.jpeg
+*.gif
