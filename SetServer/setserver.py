@@ -1,8 +1,9 @@
 import sys
-import os
 import pandas as pd
 import requests
 import ipaddress
+import hashlib
+import datetime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel,
@@ -12,8 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 DEVICE_PORT = 3377
-
-# ========== Excel 智能解析與過濾 ==========
+ALT_DEVICE_PORT = 8080     # 另外一組常見 port
 
 def is_valid_ip(s, name=""):
     try:
@@ -50,9 +50,7 @@ def find_ip_name_type_column(df):
             if is_valid_ip(ip, name=name):
                 valid_count += 1
         if valid_count > 3:
-            return (
-                pd.DataFrame({"model": model_col, "name": name_col, "ip": ip_col})
-            )
+            return pd.DataFrame({"model": model_col, "name": name_col, "ip": ip_col})
     return pd.DataFrame()
 
 def load_excel_and_parse_devices(file_path):
@@ -62,17 +60,12 @@ def load_excel_and_parse_devices(file_path):
     df = find_ip_name_type_column(df_raw)
     if df.empty:
         raise Exception("無法辨識設備資料，請確認欄位格式")
-    # 移除管理中心、空白行
     df = df[~df['model'].astype(str).str.replace(' ', '', regex=False).str.contains('管理中心')]
     df['ip'] = df['ip'].astype(str).str.strip()
     df = df[[is_valid_ip(row["ip"], row["name"]) for _, row in df.iterrows()]]
     df = df.reset_index(drop=True)
-    # 去除重複IP
     df = df.drop_duplicates(subset="ip")
-    # 轉成dict清單
     return df.to_dict(orient="records")
-
-# ========== GUI 元件 ==========
 
 class DeviceTable(QTableWidget):
     def __init__(self, parent=None):
@@ -81,7 +74,7 @@ class DeviceTable(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-    
+
     def load_devices(self, devices):
         self.setRowCount(0)
         for dev in devices:
@@ -103,7 +96,7 @@ class DeviceTable(QTableWidget):
                 name = self.item(row, 2).text()
                 result.append({'ip': ip, 'model': model, 'name': name})
         return result
-    
+
     def filter(self, keyword):
         keyword = keyword.lower()
         for row in range(self.rowCount()):
@@ -117,13 +110,11 @@ class DeviceTable(QTableWidget):
             cb = self.cellWidget(row, 0)
             cb.setChecked(checked)
 
-# ========== 主視窗 ==========
-
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("設備回報位址設定工具")
-        self.resize(880, 540)
+        self.setWindowTitle("ICMP_Server_設定工具_V1.0_By Dean")
+        self.resize(950, 560)
         self.devices = []
         self.init_ui()
 
@@ -149,6 +140,9 @@ class MainWindow(QWidget):
         self.deselect_all_btn = QPushButton("全不選")
         self.deselect_all_btn.clicked.connect(lambda: self.table.select_all(False))
         hbox.addWidget(self.deselect_all_btn)
+        self.clear_btn = QPushButton("清除資料")
+        self.clear_btn.clicked.connect(self.clear_all_data)
+        hbox.addWidget(self.clear_btn)
         layout.addLayout(hbox)
 
         # 搜尋區
@@ -163,7 +157,7 @@ class MainWindow(QWidget):
         self.table = DeviceTable()
         layout.addWidget(self.table)
 
-        # 伺服器位址設定區
+        # 伺服器位址設定區+批次重啟
         server_hbox = QHBoxLayout()
         server_hbox.addWidget(QLabel("Server IP:"))
         self.server_ip_edit = QLineEdit()
@@ -172,6 +166,9 @@ class MainWindow(QWidget):
         self.send_btn = QPushButton("發送設定")
         self.send_btn.clicked.connect(self.send_config)
         server_hbox.addWidget(self.send_btn)
+        self.reboot_btn = QPushButton("重新啟動")
+        self.reboot_btn.clicked.connect(self.batch_reboot)
+        server_hbox.addWidget(self.reboot_btn)
         layout.addLayout(server_hbox)
 
         # 狀態/報表區
@@ -221,19 +218,107 @@ class MainWindow(QWidget):
 
         ok, fail = [], []
         for dev in selected:
-            url = f"http://{dev['ip']}:{DEVICE_PORT}/set/server"
-            data = { "url": f"http://{server_ip}:8000" }
-            try:
-                r = requests.post(url, json=data, timeout=3)
-                if r.status_code == 200:
-                    ok.append(dev['ip'])
-                else:
-                    fail.append(f"{dev['ip']} (狀態:{r.status_code})")
-            except Exception as e:
-                fail.append(f"{dev['ip']} (錯誤:{str(e).splitlines()[-1]})")
-        result = f"成功：{len(ok)} 台\n" + ("、".join(ok) if ok else "")
-        result += f"\n失敗：{len(fail)} 台\n" + ("\n".join(fail) if fail else "")
+            for port in [DEVICE_PORT, ALT_DEVICE_PORT]:
+                url = f"http://{dev['ip']}:{port}/set/server"
+                data = {"url": f"http://{server_ip}:{port}"}
+                try:
+                    r = requests.post(url, json=data, timeout=3)
+                    if r.status_code == 200:
+                        ok.append(f"{dev['ip']} (port {port})")
+                        break
+                    else:
+                        last_fail = f"{dev['ip']} (port {port}) 狀態:{r.status_code}，訊息:{r.text.strip()}"
+                except Exception as e:
+                    last_fail = f"{dev['ip']} (port {port}) 錯誤:{str(e).splitlines()[-1]}"
+            else:
+                fail.append(last_fail)
+        result = f"設定成功：{len(ok)} 台\n" + ("、".join(ok) if ok else "")
+        result += f"\n設定失敗：{len(fail)} 台\n" + ("\n".join(fail) if fail else "")
         self.status_label.setText(result)
+
+    # ----------- 批次重啟完整修正版（設備時間失敗自動 fallback 本機時間） -----------
+    def batch_reboot(self):
+        selected = self.table.get_selected_devices()
+        if not selected:
+            QMessageBox.warning(self, "未選取", "請至少選取一台設備")
+            return
+        ok, fail = [], []
+        for dev in selected:
+            reboot_success = False
+            last_fail = ""
+            for port in [DEVICE_PORT, ALT_DEVICE_PORT]:
+                try:
+                    # 1. 取得 room_id
+                    try:
+                        url_info = f"http://{dev['ip']}:{port}/device/info"
+                        r_info = requests.get(url_info, timeout=3)
+                        if r_info.status_code == 200:
+                            data = r_info.json()
+                            room_id = data.get("room_id", "") or data.get("data", {}).get("room_id", "")
+                        else:
+                            continue
+                    except Exception:
+                        continue
+
+                    # 2. 取得設備時間，失敗就用本機時間
+                    try:
+                        url_time = f"http://{dev['ip']}:{port}/time"
+                        r_time = requests.get(url_time, timeout=3)
+                        if r_time.status_code == 200:
+                            data = r_time.json()
+                            device_time = data.get("time", "")
+                            if not device_time:
+                                raise Exception
+                        else:
+                            raise Exception
+                    except Exception:
+                        now = datetime.datetime.now()
+                        device_time = now.strftime('%Y-%m-%dT%H:%M:%S+08:00')
+
+                    # 3. 產生token (用設備或本機時間)
+                    try:
+                        dt = device_time.split("+")[0]
+                        dt_obj = datetime.datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S")
+                        ymd = dt_obj.strftime('%Y%m%d')
+                        hms = dt_obj.strftime('%H%M%S')
+                        text = f"remote{ymd}{room_id}{hms}".lower()
+                        token = hashlib.md5(text.encode('utf-8')).hexdigest()
+                    except Exception:
+                        continue
+
+                    # 4. 發送reboot
+                    reboot_url = f"http://{dev['ip']}:{port}/remote/reboot"
+                    payload = {
+                        "token": token,
+                        "room": room_id,
+                        "time": device_time
+                    }
+                    try:
+                        r2 = requests.post(reboot_url, json=payload, timeout=5)
+                        if r2.status_code == 200:
+                            ok.append(f"{dev['ip']} (port {port})")
+                            reboot_success = True
+                            break  # 成功就跳出port嘗試
+                        else:
+                            last_fail = f"{dev['ip']} (port {port}) 重啟失敗:{r2.status_code}，訊息：{r2.text.strip()}"
+                    except Exception as e2:
+                        last_fail = f"{dev['ip']} (port {port}) 重啟異常:{str(e2)}"
+                except Exception as e:
+                    last_fail = f"{dev['ip']} (port {port}) 重啟異常:{str(e)}"
+            if not reboot_success:
+                fail.append(last_fail)
+        result = f"重啟成功：{len(ok)} 台\n" + ("、".join(ok) if ok else "")
+        result += f"\n重啟失敗：{len(fail)} 台\n" + ("\n".join(fail) if fail else "")
+        self.status_label.setText(result)
+    # ---------------------------------------------------
+
+    def clear_all_data(self):
+        self.devices = []
+        self.table.load_devices([])
+        self.manual_ip_edit.clear()
+        self.search_edit.clear()
+        self.server_ip_edit.clear()
+        self.status_label.setText("已清除所有資料")
 
 if __name__ == "__main__":
     import warnings
