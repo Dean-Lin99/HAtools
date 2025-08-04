@@ -228,7 +228,7 @@ class MainWindow(QWidget):
         for dev in selected:
             for port in [DEVICE_PORT, ALT_DEVICE_PORT]:
                 url = f"http://{dev['ip']}:{port}/set/server"
-                data = {"url": f"http://{server_ip}:{port}"}
+                data = {"url": f"http://{server_ip}:8000"}
                 try:
                     r = requests.post(url, json=data, timeout=3)
                     if r.status_code == 200:
