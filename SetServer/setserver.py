@@ -1,4 +1,5 @@
 import sys
+import os
 import pandas as pd
 import requests
 import ipaddress
@@ -11,9 +12,13 @@ from PyQt5.QtWidgets import (
     QMessageBox, QAbstractItemView
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 
 DEVICE_PORT = 3377
-ALT_DEVICE_PORT = 8080     # 另外一組常見 port
+ALT_DEVICE_PORT = 8080
+
+def get_icon_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
 
 def is_valid_ip(s, name=""):
     try:
@@ -115,6 +120,9 @@ class MainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("ICMP_Server_設定工具_V1.0_By Dean")
         self.resize(950, 560)
+        # 設定 icon（絕對路徑）
+        icon_path = get_icon_path()
+        self.setWindowIcon(QIcon(icon_path))
         self.devices = []
         self.init_ui()
 
@@ -236,7 +244,6 @@ class MainWindow(QWidget):
         result += f"\n設定失敗：{len(fail)} 台\n" + ("\n".join(fail) if fail else "")
         self.status_label.setText(result)
 
-    # ----------- 批次重啟完整修正版（設備時間失敗自動 fallback 本機時間） -----------
     def batch_reboot(self):
         selected = self.table.get_selected_devices()
         if not selected:
@@ -310,7 +317,6 @@ class MainWindow(QWidget):
         result = f"重啟成功：{len(ok)} 台\n" + ("、".join(ok) if ok else "")
         result += f"\n重啟失敗：{len(fail)} 台\n" + ("\n".join(fail) if fail else "")
         self.status_label.setText(result)
-    # ---------------------------------------------------
 
     def clear_all_data(self):
         self.devices = []
@@ -324,6 +330,8 @@ if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore")
     app = QApplication(sys.argv)
+    icon_path = get_icon_path()
+    app.setWindowIcon(QIcon(icon_path))
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
