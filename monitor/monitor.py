@@ -5,6 +5,8 @@ import requests
 import ipaddress
 import hashlib
 import datetime
+import threading
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel,
@@ -13,7 +15,6 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThreadPool, QRunnable, pyqtSlot, QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
-import threading
 
 DEVICE_PORT = 3377
 ALT_DEVICE_PORT = 8080
@@ -22,6 +23,7 @@ MAX_THREADS = 100
 def get_icon_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
 
+# --------- 核心規則函式 ---------
 def is_valid_ip(s, name=""):
     try:
         ipstr = str(s).strip()
@@ -60,7 +62,7 @@ def find_ip_name_type_column(df):
             return pd.DataFrame({"model": model_col, "name": name_col, "ip": ip_col})
     return pd.DataFrame()
 
-def load_excel_and_parse_devices(file_path):
+def load_devices_from_excel(file_path):
     xls = pd.ExcelFile(file_path)
     sheet = "貼紙印製" if "貼紙印製" in xls.sheet_names else xls.sheet_names[0]
     df_raw = pd.read_excel(file_path, sheet_name=sheet, header=None)
@@ -74,6 +76,25 @@ def load_excel_and_parse_devices(file_path):
     df = df.drop_duplicates(subset="ip")
     return df.to_dict(orient="records")
 
+def add_manual_ip(devices, ip):
+    if not is_valid_ip(ip):
+        raise ValueError("請輸入正確的IPv4位址")
+    for d in devices:
+        if d['ip'] == ip:
+            raise ValueError("此IP已在清單中")
+    devices.append({'ip': ip, 'name': '', 'model': ''})
+    return devices
+
+def fuzzy_search_devices(devices, keyword):
+    keyword = keyword.lower()
+    filtered = []
+    for dev in devices:
+        rowtext = f"{dev.get('model','')}{dev.get('name','')}{dev.get('ip','')}".lower()
+        if keyword in rowtext:
+            filtered.append(dev)
+    return filtered
+
+# --------- GUI & Worker ---------
 class DeviceTable(QTableWidget):
     def __init__(self, parent=None):
         super().__init__(0, 4, parent)
@@ -92,7 +113,7 @@ class DeviceTable(QTableWidget):
             self.setItem(row, 1, QTableWidgetItem(str(dev.get('model', ''))))
             self.setItem(row, 2, QTableWidgetItem(str(dev.get('name', ''))))
             self.setItem(row, 3, QTableWidgetItem(str(dev['ip'])))
-    
+
     def get_selected_devices(self):
         result = []
         for row in range(self.rowCount()):
@@ -260,7 +281,7 @@ class RebootRunnable(QRunnable):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ICMP_Server_設定工具_V1.0_By Dean")
+        self.setWindowTitle("設定監視列表工具_V1.0_By Dean")
         self.resize(950, 700)
         icon_path = get_icon_path()
         self.setWindowIcon(QIcon(icon_path))
@@ -277,14 +298,14 @@ class MainWindow(QWidget):
         layout = QVBoxLayout(self)
         hbox = QHBoxLayout()
         self.import_btn = QPushButton("匯入Excel")
-        self.import_btn.clicked.connect(self.import_excel)
+        self.import_btn.clicked.connect(self.on_import_excel)
         hbox.addWidget(self.import_btn)
         hbox.addWidget(QLabel("手動輸入IP:"))
         self.manual_ip_edit = QLineEdit()
         self.manual_ip_edit.setPlaceholderText("192.168.1.10")
         hbox.addWidget(self.manual_ip_edit)
         self.manual_add_btn = QPushButton("新增")
-        self.manual_add_btn.clicked.connect(self.add_manual_ip)
+        self.manual_add_btn.clicked.connect(self.on_add_manual_ip)
         hbox.addWidget(self.manual_add_btn)
         hbox.addStretch()
         self.select_all_btn = QPushButton("全選")
@@ -301,7 +322,7 @@ class MainWindow(QWidget):
         search_hbox = QHBoxLayout()
         search_hbox.addWidget(QLabel("搜尋:"))
         self.search_edit = QLineEdit()
-        self.search_edit.textChanged.connect(self.search_devices)
+        self.search_edit.textChanged.connect(self.on_search_devices)
         search_hbox.addWidget(self.search_edit)
         layout.addLayout(search_hbox)
 
@@ -341,12 +362,12 @@ class MainWindow(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-    def import_excel(self):
+    def on_import_excel(self):
         path, _ = QFileDialog.getOpenFileName(self, "匯入 Excel", "", "Excel Files (*.xls *.xlsx)")
         if not path:
             return
         try:
-            devices = load_excel_and_parse_devices(path)
+            devices = load_devices_from_excel(path)
             self.devices = devices
             self.table.load_devices(devices)
             self.result_table.clear_results()
@@ -354,22 +375,19 @@ class MainWindow(QWidget):
         except Exception as e:
             self.status_label.setText(f"匯入失敗: {e}")
 
-    def add_manual_ip(self):
+    def on_add_manual_ip(self):
         ip = self.manual_ip_edit.text().strip()
-        if not is_valid_ip(ip):
-            QMessageBox.warning(self, "格式錯誤", "請輸入正確的IPv4位址")
+        try:
+            self.devices = add_manual_ip(self.devices, ip)
+        except ValueError as err:
+            QMessageBox.warning(self, "錯誤", str(err))
             return
-        for d in self.devices:
-            if d['ip'] == ip:
-                QMessageBox.information(self, "已存在", "此IP已在清單中")
-                return
-        self.devices.append({'ip': ip, 'name': '', 'model': ''})
         self.table.load_devices(self.devices)
         self.result_table.clear_results()
         self.manual_ip_edit.clear()
         self.status_label.setText("手動新增成功")
 
-    def search_devices(self):
+    def on_search_devices(self):
         keyword = self.search_edit.text()
         self.table.filter(keyword)
 
@@ -430,7 +448,6 @@ class MainWindow(QWidget):
             self.finish_task()
 
     def finish_task(self):
-        # 任何還沒收到訊號的設備，補上失敗
         for ip, row in self.result_table.device_ip_row_map.items():
             cell = self.result_table.item(row, 3)
             if not cell or not cell.text().strip() or cell.text().strip() == "待處理":
