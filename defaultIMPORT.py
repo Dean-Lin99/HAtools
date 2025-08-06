@@ -36,9 +36,9 @@ def find_ip_col_index(df):
             return col
     return None
 
-def is_serial_column(col, min_length=5):
+def is_first_column_serial(col, min_length=5):
     """
-    判斷這一欄是不是流水號（有一段連號即可），min_length可自行調整
+    判斷第一欄是否為流水號（有一段連號即可），min_length可調整
     """
     numbers = []
     for val in col:
@@ -59,20 +59,11 @@ def is_serial_column(col, min_length=5):
         max_streak = max(max_streak, streak)
     return max_streak >= min_length
 
-def find_serial_col(df, min_length=5):
-    """
-    回傳最早發現連號欄位的index，沒有就None
-    """
-    for col_idx in range(df.shape[1]):
-        if is_serial_column(df.iloc[:, col_idx], min_length=min_length):
-            return col_idx
-    return None
-
-def extract_room_no_from_row(row, type_col_idx, serial_col_idx=None):
+def extract_room_no_from_row(row, type_col_idx, skip_first_col=False):
     room_no_parts = []
     for i in range(type_col_idx):
-        if serial_col_idx is not None and i == serial_col_idx:
-            continue  # 自動跳過流水號欄
+        if skip_first_col and i == 0:
+            continue  # 只跳過第0欄（僅當判斷為流水號時）
         val = row[i]
         if pd.isnull(val):
             continue
@@ -87,8 +78,8 @@ def process_one_sheet(df_raw, is_sticker_sheet=False):
         return None
     devtype_col_idx = ip_col_idx - 2   # 設備類型
     name_col_idx = ip_col_idx - 1      # 名稱
-    # 自動偵測流水號欄
-    serial_col_idx = find_serial_col(df_raw)
+    # 只判斷第一欄是否為流水號
+    skip_first_col = is_first_column_serial(df_raw.iloc[:, 0], min_length=5)
     device_list = []
     for idx, row in df_raw.iterrows():
         ip = str(row[ip_col_idx]).replace(" ", "").strip()
@@ -98,7 +89,7 @@ def process_one_sheet(df_raw, is_sticker_sheet=False):
         if "管理中心" in dev_type:
             continue
         name = str(row[name_col_idx]).strip() if name_col_idx >= 0 else ""
-        room_no = extract_room_no_from_row(row, devtype_col_idx, serial_col_idx)
+        room_no = extract_room_no_from_row(row, devtype_col_idx, skip_first_col)
         device_list.append({
             '設備類型': dev_type,
             '名稱': name,
