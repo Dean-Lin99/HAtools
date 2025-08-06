@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QMessageBox, QAbstractItemView, QComboBox
+    QMessageBox, QAbstractItemView, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
@@ -140,6 +140,7 @@ class MainWindow(QWidget):
         self.devices = []
         self.to_be_sent_devices = []
         self.public_devices = []
+        self.original_order = []
         self.init_ui()
 
     def init_ui(self):
@@ -192,7 +193,7 @@ class MainWindow(QWidget):
         layout.addLayout(add_hbox)
 
         # === 待下發設備清單 ===
-        layout.addWidget(QLabel("待下發設備清單（可刪除）"))
+        layout.addWidget(QLabel("待下發設備清單（可刪除，刪除後自動回到主清單）"))
         self.send_table = DeviceTable(selectable=True)
         self.send_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.send_table)
@@ -205,7 +206,7 @@ class MainWindow(QWidget):
         layout.addLayout(del_send_hbox)
 
         # === 公區設備清單 ===
-        layout.addWidget(QLabel("公區設備清單（可刪除）"))
+        layout.addWidget(QLabel("公區設備清單（可刪除，刪除後自動回到主清單）"))
         self.public_table = DeviceTable(selectable=True)
         self.public_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.public_table)
@@ -217,12 +218,19 @@ class MainWindow(QWidget):
         del_public_hbox.addStretch()
         layout.addLayout(del_public_hbox)
 
-        # 私區+下發功能
+        # ---- 私區+下發功能（多選 02~10）----
         private_hbox = QHBoxLayout()
-        private_hbox.addWidget(QLabel("私區小門口機:"))
-        self.private_combo = QComboBox()
-        self.private_combo.addItems([f"{i:02d}" for i in range(1, 13)])
-        private_hbox.addWidget(self.private_combo)
+        private_hbox.addWidget(QLabel("私區小門口機(可多選):"))
+
+        self.private_list = QListWidget()
+        self.private_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        for i in range(2, 11):
+            item = QListWidgetItem(f"{i:02d}")
+            self.private_list.addItem(item)
+        self.private_list.setMaximumHeight(80)
+        self.private_list.setMaximumWidth(150)
+        private_hbox.addWidget(self.private_list)
+
         private_hbox.addStretch()
         self.deploy_btn = QPushButton("下發監視列表")
         self.deploy_btn.clicked.connect(self.deploy_monitor_list)
@@ -239,7 +247,8 @@ class MainWindow(QWidget):
             return
         try:
             devices = load_excel_and_parse_devices(path)
-            self.devices = devices
+            self.devices = devices.copy()
+            self.original_order = devices.copy()
             self.table.load_devices(self.devices)
             self.status_label.setText(f"匯入成功，共 {len(devices)} 筆設備")
             self.search_devices()
@@ -251,11 +260,13 @@ class MainWindow(QWidget):
         if not is_valid_ip(ip):
             QMessageBox.warning(self, "格式錯誤", "請輸入正確的IPv4位址")
             return
-        for d in self.devices:
+        for d in (self.devices + self.to_be_sent_devices + self.public_devices):
             if d['ip'] == ip:
                 QMessageBox.information(self, "已存在", "此IP已在清單中")
                 return
-        self.devices.append({'ip': ip, 'name': '', 'model': ''})
+        dev = {'ip': ip, 'name': '', 'model': ''}
+        self.devices.append(dev)
+        self.original_order.append(dev)
         self.table.load_devices(self.devices)
         self.manual_ip_edit.clear()
         self.status_label.setText("手動新增成功")
@@ -272,6 +283,7 @@ class MainWindow(QWidget):
         self.send_table.load_devices([])
         self.public_devices = []
         self.public_table.load_devices([])
+        self.original_order = []
         self.manual_ip_edit.clear()
         self.search_edit.clear()
         self.status_label.setText("已清除所有資料")
@@ -315,31 +327,63 @@ class MainWindow(QWidget):
         if not rows:
             QMessageBox.information(self, "未選擇", "請選取要刪除的設備")
             return
+        restored = []
         for row in rows:
+            dev = self.to_be_sent_devices[row]
+            restored.append(dev)
             del self.to_be_sent_devices[row]
             self.send_table.removeRow(row)
-        self.status_label.setText("已刪除選取設備。")
+        main_ips = set([d['ip'] for d in self.devices])
+        for d in restored:
+            if d['ip'] not in main_ips:
+                self.devices.append(d)
+        self.devices = self.sort_by_original_order(self.devices)
+        self.table.load_devices(self.devices)
+        self.status_label.setText("已刪除並回復到主清單（順序已還原）。")
 
     def delete_selected_public_device(self):
         rows = sorted(set(idx.row() for idx in self.public_table.selectedIndexes()), reverse=True)
         if not rows:
             QMessageBox.information(self, "未選擇", "請選取要刪除的設備")
             return
+        restored = []
         for row in rows:
+            dev = self.public_devices[row]
+            restored.append(dev)
             del self.public_devices[row]
             self.public_table.removeRow(row)
-        self.status_label.setText("已刪除選取設備。")
+        main_ips = set([d['ip'] for d in self.devices])
+        for d in restored:
+            if d['ip'] not in main_ips:
+                self.devices.append(d)
+        self.devices = self.sort_by_original_order(self.devices)
+        self.table.load_devices(self.devices)
+        self.status_label.setText("已刪除並回復到主清單（順序已還原）。")
+
+    def sort_by_original_order(self, device_list):
+        ip_to_dev = {d['ip']: d for d in device_list}
+        sorted_list = []
+        for od in self.original_order:
+            if od['ip'] in ip_to_dev:
+                sorted_list.append(ip_to_dev[od['ip']])
+        return sorted_list
 
     def deploy_monitor_list(self):
         public_devices = self.public_devices
-        if not public_devices:
-            QMessageBox.warning(self, "未選擇設備", "公區設備不能為空")
-            return
-        private_gate = self.private_combo.currentText()
-        info = f"下發監視列表:\n\n公區設備：\n"
-        for dev in public_devices:
-            info += f"- [{dev['model']}] {dev['name']} ({dev['ip']})\n"
-        info += f"\n私區小門口機：{private_gate}\n"
+        private_selected = [item.text() for item in self.private_list.selectedItems()]
+        info = f"下發監視列表:\n\n"
+        info += "公區設備：\n"
+        if public_devices:
+            for dev in public_devices:
+                info += f"- [{dev['model']}] {dev['name']} ({dev['ip']})\n"
+        else:
+            info += "(無)\n"
+        info += "\n私區小門口機："
+        if private_selected:
+            info += ", ".join(private_selected)
+        else:
+            info += "(無)"
+        info += "\n"
         QMessageBox.information(self, "下發資訊", info)
         self.status_label.setText("已下發監視列表（模擬）")
 

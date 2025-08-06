@@ -1,8 +1,8 @@
 import sys
 import os
 import pandas as pd
-import requests
 import ipaddress
+import re
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel,
@@ -15,62 +15,75 @@ from PyQt5.QtGui import QIcon
 def get_icon_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
 
-def is_valid_ip(s, name=""):
+def is_valid_ip(s):
     try:
         ipstr = str(s).strip()
-        name = str(name).lower()
-        for badword in ["mask", "遮罩", "gateway", "網關", "gw", "router", "default gateway"]:
-            if badword in name:
-                return False
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ipstr):
+            return False
         ip = ipaddress.ip_address(ipstr)
-        if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_reserved or ip.is_link_local:
+        if ip.is_multicast or ip.is_reserved or ip.is_loopback or ip.is_unspecified or ip.is_link_local:
             return False
-        if ipstr.startswith("255.") or ipstr in ("0.0.0.0", "255.255.255.255"):
+        if ipstr in ("255.255.255.255", "0.0.0.0", "255.255.255.0", "255.255.0.0", "255.0.0.0"):
             return False
-        if ipstr in ("255.255.255.0", "255.255.0.0", "255.0.0.0"):
-            return False
-        if ipstr.split(".")[-1] == "1":
-            if name and any(x not in "0123456789.[] " for x in name):
-                pass
-            else:
-                return False
-        if not isinstance(ip, ipaddress.IPv4Address):
-            return False
-        return True
+        return ip.version == 4
     except Exception:
         return False
 
-def find_ip_name_type_column(df):
-    for i in range(2, len(df.columns)):
-        model_col = df.iloc[:, i - 2]
-        name_col = df.iloc[:, i - 1]
-        ip_col = df.iloc[:, i]
-        valid_count = 0
-        for dev_type, name, ip in zip(model_col, name_col, ip_col):
-            if is_valid_ip(ip, name=name):
-                valid_count += 1
-        if valid_count > 3:
-            return pd.DataFrame({"model": model_col, "name": name_col, "ip": ip_col})
-    return pd.DataFrame()
+def find_ip_col_index(df):
+    for col in range(len(df.columns)):
+        valid = sum(is_valid_ip(cell) for cell in df.iloc[:, col])
+        if valid >= 2:
+            return col
+    return None
+
+def extract_room_no_from_row(row, ip_col_idx):
+    """
+    房號：設備類型前所有格，格首連續數字直接取出，其他跳過。保留前導零。
+    例如 066號 -> 066, 01樓->01, 01 -> 01, 97區->97
+    """
+    room_no_parts = []
+    for i in range(1, ip_col_idx - 2):
+        val = row[i]
+        if pd.isnull(val):
+            continue
+        val_str = str(val).strip()
+        # 取開頭連續數字
+        m = re.match(r'^(\d+)', val_str)
+        if m:
+            room_no_parts.append(m.group(1))
+    return ''.join(room_no_parts)
 
 def load_excel_and_parse_devices(file_path):
     xls = pd.ExcelFile(file_path)
     sheet = "貼紙印製" if "貼紙印製" in xls.sheet_names else xls.sheet_names[0]
-    df_raw = pd.read_excel(file_path, sheet_name=sheet, header=None)
-    df = find_ip_name_type_column(df_raw)
-    if df.empty:
-        raise Exception("無法辨識設備資料，請確認欄位格式")
-    df = df[~df['model'].astype(str).str.replace(' ', '', regex=False).str.contains('管理中心')]
-    df['ip'] = df['ip'].astype(str).str.strip()
-    df = df[[is_valid_ip(row["ip"], row["name"]) for _, row in df.iterrows()]]
-    df = df.reset_index(drop=True)
+    df_raw = pd.read_excel(file_path, sheet_name=sheet, header=None, dtype=str)
+    ip_col_idx = find_ip_col_index(df_raw)
+    if ip_col_idx is None or ip_col_idx < 2:
+        raise Exception("找不到有效IPv4欄位")
+    device_list = []
+    for idx, row in df_raw.iterrows():
+        ip = str(row[ip_col_idx]).strip()
+        if not is_valid_ip(ip):
+            continue
+        dev_type = str(row[ip_col_idx - 2]).strip() if ip_col_idx - 2 >= 0 else ""
+        if "管理中心" in dev_type:
+            continue
+        name = str(row[ip_col_idx - 1]).strip() if ip_col_idx - 1 >= 0 else ""
+        room_no = extract_room_no_from_row(row, ip_col_idx)
+        device_list.append({
+            'dev_type': dev_type,
+            'name': name,
+            'ip': ip,
+            'room_no': room_no
+        })
+    df = pd.DataFrame(device_list)
     df = df.drop_duplicates(subset="ip")
     return df.to_dict(orient="records")
 
 class DeviceTable(QTableWidget):
     def __init__(self, parent=None):
-        super().__init__(0, 4, parent)
-        self.setHorizontalHeaderLabels(['選取', '設備類型', '名稱', 'IP'])
+        super().__init__(0, 5, parent)
+        self.setHorizontalHeaderLabels(['選取', '設備類型', '名稱', 'IP', '房號'])
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -82,9 +95,10 @@ class DeviceTable(QTableWidget):
             self.insertRow(row)
             cb = QCheckBox()
             self.setCellWidget(row, 0, cb)
-            self.setItem(row, 1, QTableWidgetItem(str(dev.get('model', ''))))
+            self.setItem(row, 1, QTableWidgetItem(str(dev.get('dev_type', ''))))
             self.setItem(row, 2, QTableWidgetItem(str(dev.get('name', ''))))
             self.setItem(row, 3, QTableWidgetItem(str(dev['ip'])))
+            self.setItem(row, 4, QTableWidgetItem(str(dev.get('room_no', ''))))
 
     def get_selected_devices(self):
         result = []
@@ -92,21 +106,22 @@ class DeviceTable(QTableWidget):
             cb = self.cellWidget(row, 0)
             if cb.isChecked():
                 ip = self.item(row, 3).text()
-                model = self.item(row, 1).text()
+                dev_type = self.item(row, 1).text()
                 name = self.item(row, 2).text()
-                result.append({'ip': ip, 'model': model, 'name': name})
+                room_no = self.item(row, 4).text()
+                result.append({'ip': ip, 'dev_type': dev_type, 'name': name, 'room_no': room_no})
         return result
 
     def filter(self, keyword):
         keyword = keyword.lower()
         for row in range(self.rowCount()):
             text = (
-                self.item(row, 1).text() + self.item(row, 2).text() + self.item(row, 3).text()
+                self.item(row, 1).text() + self.item(row, 2).text() +
+                self.item(row, 3).text() + self.item(row, 4).text()
             ).lower()
             self.setRowHidden(row, keyword not in text)
 
-    def select_all(self, checked:bool):
-        # 只針對目前顯示的資料
+    def select_all(self, checked: bool):
         for row in range(self.rowCount()):
             if not self.isRowHidden(row):
                 cb = self.cellWidget(row, 0)
@@ -116,11 +131,10 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("設備清單管理工具")
-        self.resize(950, 550)
+        self.resize(1050, 550)
         icon_path = get_icon_path()
         self.setWindowIcon(QIcon(icon_path))
         self.devices = []
-        self.filtered_devices = []
         self.init_ui()
 
     def init_ui(self):
@@ -132,7 +146,7 @@ class MainWindow(QWidget):
         hbox.addWidget(QLabel("手動輸入IP:"))
         self.manual_ip_edit = QLineEdit()
         self.manual_ip_edit.setPlaceholderText("192.168.1.10")
-        self.manual_ip_edit.returnPressed.connect(self.add_manual_ip)  # ←← 新增這一行
+        self.manual_ip_edit.returnPressed.connect(self.add_manual_ip)
         hbox.addWidget(self.manual_ip_edit)
         self.manual_add_btn = QPushButton("新增")
         self.manual_add_btn.clicked.connect(self.add_manual_ip)
@@ -172,7 +186,7 @@ class MainWindow(QWidget):
             self.devices = devices
             self.table.load_devices(devices)
             self.status_label.setText(f"匯入成功，共 {len(devices)} 筆設備")
-            self.search_devices()  # 重新套用搜尋結果
+            self.search_devices()
         except Exception as e:
             self.status_label.setText(f"匯入失敗: {e}")
 
@@ -185,11 +199,11 @@ class MainWindow(QWidget):
             if d['ip'] == ip:
                 QMessageBox.information(self, "已存在", "此IP已在清單中")
                 return
-        self.devices.append({'ip': ip, 'name': '', 'model': ''})
+        self.devices.append({'ip': ip, 'name': '', 'dev_type': '', 'room_no': ''})
         self.table.load_devices(self.devices)
         self.manual_ip_edit.clear()
         self.status_label.setText("手動新增成功")
-        self.search_devices()  # 重新套用搜尋結果
+        self.search_devices()
 
     def search_devices(self):
         keyword = self.search_edit.text()
