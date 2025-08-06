@@ -36,60 +36,104 @@ def find_ip_col_index(df):
             return col
     return None
 
-def extract_room_no_from_row(row, ip_col_idx):
+def is_serial_column(col, min_length=5):
     """
-    房號：設備類型前所有格，格首連續數字直接取出，其他跳過。保留前導零。
-    例如 066號 -> 066, 01樓->01, 01 -> 01, 97區->97
+    判斷這一欄是不是流水號（有一段連號即可），min_length可自行調整
     """
+    numbers = []
+    for val in col:
+        try:
+            v = int(str(val).strip())
+            numbers.append(v)
+        except:
+            numbers.append(None)
+    max_streak = 0
+    streak = 0
+    prev = None
+    for n in numbers:
+        if n is not None and (prev is None or n == prev + 1):
+            streak += 1
+        else:
+            streak = 1 if n is not None else 0
+        prev = n
+        max_streak = max(max_streak, streak)
+    return max_streak >= min_length
+
+def find_serial_col(df, min_length=5):
+    """
+    回傳最早發現連號欄位的index，沒有就None
+    """
+    for col_idx in range(df.shape[1]):
+        if is_serial_column(df.iloc[:, col_idx], min_length=min_length):
+            return col_idx
+    return None
+
+def extract_room_no_from_row(row, type_col_idx, serial_col_idx=None):
     room_no_parts = []
-    for i in range(1, ip_col_idx - 2):
+    for i in range(type_col_idx):
+        if serial_col_idx is not None and i == serial_col_idx:
+            continue  # 自動跳過流水號欄
         val = row[i]
         if pd.isnull(val):
             continue
         val_str = str(val).strip()
-        m = re.match(r'^(\d+)', val_str)
-        if m:
-            room_no_parts.append(m.group(1))
+        if re.fullmatch(r'\d+', val_str):
+            room_no_parts.append(val_str)
     return ''.join(room_no_parts)
+
+def process_one_sheet(df_raw, is_sticker_sheet=False):
+    ip_col_idx = find_ip_col_index(df_raw)
+    if ip_col_idx is None or ip_col_idx < 2:
+        return None
+    devtype_col_idx = ip_col_idx - 2   # 設備類型
+    name_col_idx = ip_col_idx - 1      # 名稱
+    # 自動偵測流水號欄
+    serial_col_idx = find_serial_col(df_raw)
+    device_list = []
+    for idx, row in df_raw.iterrows():
+        ip = str(row[ip_col_idx]).replace(" ", "").strip()
+        if not is_valid_ip(ip):
+            continue
+        dev_type = str(row[devtype_col_idx]).strip() if devtype_col_idx >= 0 else ""
+        if "管理中心" in dev_type:
+            continue
+        name = str(row[name_col_idx]).strip() if name_col_idx >= 0 else ""
+        room_no = extract_room_no_from_row(row, devtype_col_idx, serial_col_idx)
+        device_list.append({
+            '設備類型': dev_type,
+            '名稱': name,
+            'IP': ip,
+            '房號': room_no
+        })
+    df = pd.DataFrame(device_list)
+    df = df.drop_duplicates(subset="IP")
+    records = df.to_dict(orient="records")
+    for rec in records:
+        rec["選取"] = False
+    cols = ["選取", "設備類型", "名稱", "IP", "房號"]
+    final_list = []
+    for rec in records:
+        item = {k: rec.get(k, "") for k in cols}
+        final_list.append(item)
+    return final_list
 
 def load_excel_and_parse_devices(file_path):
     xls = pd.ExcelFile(file_path)
-    # 優先找第一個有「明顯IP欄」的sheet
+    # 優先處理「貼紙印製」sheet
+    if "貼紙印製" in xls.sheet_names:
+        df_raw = pd.read_excel(file_path, sheet_name="貼紙印製", header=None, dtype=str)
+        result = process_one_sheet(df_raw, is_sticker_sheet=True)
+        if result is not None:
+            return result
+    # 沒有貼紙印製才輪詢其他 sheet
     for sheet_name in xls.sheet_names:
+        if sheet_name == "貼紙印製":
+            continue
         df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, dtype=str)
-        ip_col_idx = find_ip_col_index(df_raw)
-        if ip_col_idx is not None and ip_col_idx >= 2:
-            # 這個sheet結構可用，直接用房號邏輯
-            device_list = []
-            for idx, row in df_raw.iterrows():
-                ip = str(row[ip_col_idx]).replace(" ", "").strip()
-                if not is_valid_ip(ip):
-                    continue
-                dev_type = str(row[ip_col_idx - 2]).strip() if ip_col_idx - 2 >= 0 else ""
-                if "管理中心" in dev_type:
-                    continue
-                name = str(row[ip_col_idx - 1]).strip() if ip_col_idx - 1 >= 0 else ""
-                room_no = extract_room_no_from_row(row, ip_col_idx)
-                device_list.append({
-                    '設備類型': dev_type,
-                    '名稱': name,
-                    'IP': ip,
-                    '房號': room_no
-                })
-            df = pd.DataFrame(device_list)
-            df = df.drop_duplicates(subset="IP")
-            # 插入選取欄
-            records = df.to_dict(orient="records")
-            for rec in records:
-                rec["選取"] = False
-            # 保證選取欄在最前
-            cols = ["選取"] + [c for c in df.columns]
-            final_list = []
-            for rec in records:
-                item = {k: rec.get(k, "") for k in cols}
-                final_list.append(item)
-            return final_list
-    # 沒有任何sheet適用完整解析，退回只抓全檔案所有合法IP
+        result = process_one_sheet(df_raw, is_sticker_sheet=False)
+        if result is not None:
+            return result
+    # 如果都找不到結構化IP欄，只做單純全檔IP掃描
     ip_set = set()
     device_list = []
     for sheet_name in xls.sheet_names:
@@ -105,7 +149,6 @@ def load_excel_and_parse_devices(file_path):
                         '選取': False
                     })
                     ip_set.add(ip)
-    # 欄位順序統一
     cols = ["選取", "IP"]
     final_list = []
     for rec in device_list:
@@ -120,14 +163,11 @@ class DeviceTable(QTableWidget):
 
     def set_columns_and_data(self, devices):
         self.setRowCount(0)
-        # 依據資料自動決定欄位
         if not devices:
             self.setColumnCount(0)
             self.setHorizontalHeaderLabels([])
             self.data_keys = []
             return
-
-        # 用第一筆key順序，其他多出key補上
         keys = list(devices[0].keys())
         for dev in devices:
             for k in dev.keys():
@@ -157,7 +197,6 @@ class DeviceTable(QTableWidget):
                     result.append(item_data)
             return result
         else:
-            # 沒checkbox欄，全部回傳
             result = []
             for row in range(self.rowCount()):
                 item_data = {k: self.item(row, i).text() if self.item(row, i) else '' for i, k in enumerate(self.data_keys)}
@@ -250,7 +289,6 @@ class MainWindow(QWidget):
         if not is_valid_ip(ip):
             QMessageBox.warning(self, "格式錯誤", "請輸入正確的IPv4位址")
             return
-        # 自動根據現有欄位插入
         keys = self.table.data_keys or ["選取", "IP"]
         rec = {k: "" for k in keys}
         rec["IP"] = ip
