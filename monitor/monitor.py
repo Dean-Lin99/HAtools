@@ -6,16 +6,26 @@ import ipaddress
 import pandas as pd
 import requests
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QMessageBox, QAbstractItemView, QProgressBar, QListWidget, QListWidgetItem
+    QMessageBox, QAbstractItemView, QProgressBar, QListWidget, QListWidgetItem,
+    QDialog
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
 
-DEFAULT_DEV_PORT = 3377  # 固定裝置 Port
+# =========================
+# 常數
+# =========================
+DEFAULT_DEV_PORT = 3377      # 固定裝置 Port
+BTN_H = 34                   # 統一按鈕高度
+FIXED_COLUMNS = ["選取", "設備類型", "名稱", "IP", "房號"]  # 三個列表欄位一致，且「選取」一律第一欄
+DEPLOY_MAX_WORKERS = 50      # 下發最大並行數（多執行緒）
+APP_PASSWORD = os.environ.get("MONITOR_PASSWORD", "1234")  # 啟動密碼（可用環境變數覆寫）
 
 # =========================
 # 公用工具
@@ -108,7 +118,7 @@ def process_one_sheet(df_raw):
 
         dev_type_raw = row[devtype_col_idx] if devtype_col_idx >= 0 else ""
         dev_type = "" if is_nullish(dev_type_raw) else str(dev_type_raw).strip()
-        if "管理中心" in dev_type:
+        if "管理中心" in dev_type:  # 明確排除「管理中心」
             continue
 
         name_raw = row[name_col_idx] if name_col_idx >= 0 else ""
@@ -117,7 +127,7 @@ def process_one_sheet(df_raw):
         room_no = extract_room_no_from_row(row, devtype_col_idx, skip_first)
         devices.append({
             "設備類型": dev_type,
-            "名稱": name,         # 名稱：完全使用匯入後的名稱，不做加工
+            "名稱": name,         # 名稱直接使用匯入結果
             "IP": ip,
             "房號": room_no,
             "選取": False
@@ -160,17 +170,25 @@ def load_excel_and_parse_devices(file_path):
                     continue
                 ip = str(cell).replace(" ", "").strip()
                 if is_valid_ip(ip) and ip not in ip_set:
-                    device_list.append({"選取": False, "IP": ip})
+                    device_list.append({"選取": False, "設備類型": "", "名稱": "", "IP": ip, "房號": ""})
                     ip_set.add(ip)
     return device_list
 
 # =========================
-# UI：表格（好點的勾選）
+# UI：表格（固定欄位，一致化）
 # =========================
 class DeviceTable(QTableWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, columns=None):
         super().__init__(0, 0, parent)
-        self.data_keys = []
+        self.columns = list(columns or [])
+        if not self.columns:
+            self.columns = list(FIXED_COLUMNS)
+        # 確保「選取」第一欄
+        if "選取" in self.columns:
+            self.columns = ["選取"] + [c for c in self.columns if c != "選取"]
+        else:
+            self.columns = ["選取"] + self.columns
+
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.verticalHeader().setVisible(False)
@@ -183,25 +201,13 @@ class DeviceTable(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
-    def set_columns_and_data(self, devices):
-        self.setRowCount(0)
-        if not devices:
-            self.setColumnCount(0)
-            self.setHorizontalHeaderLabels([])
-            self.data_keys = []
-            return
-        keys = list(devices[0].keys())
-        for d in devices:
-            for k in d.keys():
-                if k not in keys:
-                    keys.append(k)
-        self.data_keys = keys
-        self.setColumnCount(len(keys))
-        self.setHorizontalHeaderLabels(keys)
+        self._apply_headers()
+
+    def _apply_headers(self):
+        self.setColumnCount(len(self.columns))
+        self.setHorizontalHeaderLabels(self.columns)
 
     def _checkbox_at(self, row):
-        if not self.data_keys or self.data_keys[0] != "選取":
-            return None
         w = self.cellWidget(row, 0)
         return w.findChild(QCheckBox) if w else None
 
@@ -211,40 +217,40 @@ class DeviceTable(QTableWidget):
             cb.setChecked(checked)
 
     def on_cell_clicked(self, row, col):
-        if self.data_keys and self.data_keys[0] == "選取" and col != 0:
+        if col != 0:
             cb = self._checkbox_at(row)
             if cb:
                 cb.setChecked(not cb.isChecked())
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Space and self.data_keys and self.data_keys[0] == "選取":
+        if e.key() == Qt.Key_Space:
             rows = sorted(set(i.row() for i in self.selectedIndexes()))
-            checks = []
-            for r in rows:
-                cb = self._checkbox_at(r)
-                checks.append(cb.isChecked() if cb else False)
-            target = not (sum(checks) > len(checks)/2)
-            for r in rows:
-                self.set_row_checked(r, target)
-            e.accept()
-            return
+            if rows:
+                checks = []
+                for r in rows:
+                    cb = self._checkbox_at(r)
+                    checks.append(cb.isChecked() if cb else False)
+                target = not (sum(checks) > len(checks)/2)
+                for r in rows:
+                    self.set_row_checked(r, target)
+                e.accept()
+                return
         super().keyPressEvent(e)
 
     def get_selected_devices(self):
-        if self.data_keys and self.data_keys[0] == "選取":
-            res = []
-            for r in range(self.rowCount()):
-                cb = self._checkbox_at(r)
-                if cb and cb.isChecked():
-                    item = {k: self.item(r, i).text() if self.item(r, i) else "" for i, k in enumerate(self.data_keys) if k != "選取"}
-                    res.append(item)
-            return res
-        else:
-            res = []
-            for r in range(self.rowCount()):
-                item = {k: self.item(r, i).text() if self.item(r, i) else "" for i, k in enumerate(self.data_keys)}
+        """回傳有勾選的列（不含『選取』欄）"""
+        res = []
+        for r in range(self.rowCount()):
+            cb = self._checkbox_at(r)
+            if cb and cb.isChecked():
+                item = {}
+                for c, key in enumerate(self.columns):
+                    if key == "選取":
+                        continue
+                    it = self.item(r, c)
+                    item[key] = it.text() if it else ""
                 res.append(item)
-            return res
+        return res
 
     def filter(self, keyword):
         kw = (keyword or "").lower()
@@ -257,21 +263,21 @@ class DeviceTable(QTableWidget):
             self.setRowHidden(r, kw not in " ".join(txt))
 
     def select_all(self, checked: bool, only_visible=True):
-        if not self.data_keys or self.data_keys[0] != "選取":
-            return
         for r in range(self.rowCount()):
             if only_visible and self.isRowHidden(r):
                 continue
             self.set_row_checked(r, checked)
 
     def populate(self, devices):
-        self.set_columns_and_data(devices)
+        """只顯示固定欄位；裝載其他隱藏欄位資料由清單本身持有"""
+        self.setRowCount(0)
+        self._apply_headers()
         if not devices:
             return
         for d in devices:
             r = self.rowCount()
             self.insertRow(r)
-            for c, key in enumerate(self.data_keys):
+            for c, key in enumerate(self.columns):
                 if key == "選取":
                     cb = QCheckBox()
                     cb.setChecked(bool(d.get("選取", False)))
@@ -284,21 +290,31 @@ class DeviceTable(QTableWidget):
                     val = str(d.get(key, ""))
                     self.setItem(r, c, QTableWidgetItem(val))
 
+    # --- 供刪除使用：回傳勾選列索引 ---
+    def get_checked_row_indexes(self):
+        rows = []
+        for r in range(self.rowCount()):
+            cb = self._checkbox_at(r)
+            if cb and cb.isChecked():
+                rows.append(r)
+        return rows
+
 # =========================
-# 下發 Worker（QThread）
+# 下發 Worker（QThread + 多執行緒）
 # =========================
 class DeployWorker(QThread):
-    one_done = pyqtSignal(dict)    # {'ip','room','status','detail','code'}
+    one_done = pyqtSignal(dict)      # {'ip','room','status','detail','code'}
     progress = pyqtSignal(int, int)  # done,total
     all_done = pyqtSignal()
 
-    def __init__(self, targets, public_src, private_codes, all_by_room, timeout=6, parent=None):
+    def __init__(self, targets, public_src, private_codes, all_by_room, timeout=6, max_workers=DEPLOY_MAX_WORKERS, parent=None):
         super().__init__(parent)
-        self.targets = targets                 # 目標室內機清單（每台要 POST）
-        self.public_src = public_src or []     # 公區來源（直接用其房號/IP/名稱）
-        self.private_codes = private_codes or []  # ['02','03',...]
-        self.all_by_room = all_by_room or {}   # {房號: 設備dict}
+        self.targets = targets                   # 目標室內機清單（每台要 POST）
+        self.public_src = public_src or []       # 公區來源（可含 voip 與 rtsp）
+        self.private_codes = private_codes or [] # ['02','03',...]
+        self.all_by_room = all_by_room or {}     # {房號: 設備dict}
         self.timeout = timeout
+        self.max_workers = max(1, int(max_workers))
 
     def _voip_entry_from_item(self, item):
         # 名稱必須使用匯入的名稱，不做任何加工
@@ -308,8 +324,28 @@ class DeployWorker(QThread):
         url = f"sip:{room}@{ip}:5060"
         return {"type": "voip", "name": name, "url": url}
 
+    def _public_fixed(self):
+        """
+        公區來源可混用：
+        - voip 來源：從匯入設備（有 房號/IP/名稱）產生
+        - rtsp 來源：手動新增（有 type='rtsp', name, url）
+        """
+        out = []
+        for d in self.public_src:
+            t = str(d.get("type", "")).lower()
+            if t == "rtsp":
+                name = str(d.get("名稱") or d.get("name") or "").strip()
+                url = str(d.get("url") or "").strip()
+                if name and url:
+                    out.append({"type": "rtsp", "name": name, "url": url})
+            else:
+                # 視為 voip
+                if d.get("房號") and d.get("IP"):
+                    out.append(self._voip_entry_from_item(d))
+        return out
+
     def _private_for_target(self, target_room: str):
-        """依 target 房號底碼 + private_codes 去 all_by_room 找私區設備"""
+        """依 target 房號底碼 + private_codes 去 all_by_room 找私區設備（voip）"""
         if not target_room or len(target_room) < 3:
             return [], []
         base = target_room[:-2] if len(target_room) >= 2 else target_room
@@ -324,65 +360,110 @@ class DeployWorker(QThread):
                 missing_list.append(room)
         return found_list, missing_list
 
-    def _public_fixed(self):
-        # 公區名稱嚴格使用匯入「公區來源清單」內的名稱，不做任何 fallback
-        return [self._voip_entry_from_item(d) for d in self.public_src if d.get("房號") and d.get("IP")]
+    def _do_one(self, ip, room, payload, missing):
+        headers = {"Content-Type": "application/json"}
+        url = f"http://{ip}:{DEFAULT_DEV_PORT}/monitor"
+        status = "失敗"
+        detail = ""
+        code = None
+        try:
+            resp = requests.post(
+                url,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+                timeout=self.timeout
+            )
+            code = resp.status_code
+            if code == 200:
+                status = "成功"
+                if not payload.get("private") and not payload.get("public"):
+                    detail = "OK（送出空監視列表：已清空設備設定）"
+                else:
+                    detail = "OK"
+            elif code == 400:
+                detail = "Bad Request（參數錯誤）"
+            elif code == 500:
+                detail = "Internal Error（伺服器錯誤）"
+            else:
+                detail = f"HTTP {code}"
+        except requests.exceptions.ConnectTimeout:
+            detail = "連線逾時"
+        except requests.exceptions.ReadTimeout:
+            detail = "讀取逾時"
+        except requests.exceptions.ConnectionError as e:
+            detail = f"連線錯誤：{e}"
+        except Exception as e:
+            detail = f"例外：{e}"
+
+        if missing:
+            miss_str = ",".join(missing)
+            detail = (detail + f"；缺少私區來源: {miss_str}") if detail else f"缺少私區來源: {miss_str}"
+
+        return {"ip": ip, "room": room, "status": status, "detail": detail, "code": code}
 
     def run(self):
         total = len(self.targets)
         done = 0
-        headers = {"Content-Type": "application/json"}
-        public_fixed_global = self._public_fixed()  # 公區是固定清單（可為空）
+        public_fixed_global = self._public_fixed()  # 公區固定（可為空，含 rtsp/voip）
 
-        for dev in self.targets:
-            ip = (dev.get("IP") or "").strip()
-            room = (dev.get("房號") or "").strip()
+        tasks = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            for dev in self.targets:
+                ip = (dev.get("IP") or "").strip()
+                room = (dev.get("房號") or "").strip()
+                private_list, missing = self._private_for_target(room)  # 依每台目標計算（可為空）
+                payload = {"private": private_list, "public": public_fixed_global}
+                tasks.append(pool.submit(self._do_one, ip, room, payload, missing))
 
-            private_list, missing = self._private_for_target(room)  # 依每台目標計算（可為空）
-            payload = {"private": private_list, "public": public_fixed_global}
-
-            url = f"http://{ip}:{DEFAULT_DEV_PORT}/monitor"
-            status = "失敗"
-            detail = ""
-            code = None
-            try:
-                resp = requests.post(
-                    url,
-                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                    headers=headers,
-                    timeout=self.timeout
-                )
-                code = resp.status_code
-                if code == 200:
-                    status = "成功"
-                    if not private_list and not public_fixed_global:
-                        detail = "OK（送出空監視列表：已清空設備設定）"
-                    else:
-                        detail = "OK"
-                elif code == 400:
-                    detail = "Bad Request（參數錯誤）"
-                elif code == 500:
-                    detail = "Internal Error（伺服器錯誤）"
-                else:
-                    detail = f"HTTP {code}"
-            except requests.exceptions.ConnectTimeout:
-                detail = "連線逾時"
-            except requests.exceptions.ReadTimeout:
-                detail = "讀取逾時"
-            except requests.exceptions.ConnectionError as e:
-                detail = f"連線錯誤：{e}"
-            except Exception as e:
-                detail = f"例外：{e}"
-
-            if missing:
-                miss_str = ",".join(missing)
-                detail = (detail + f"；缺少私區來源: {miss_str}") if detail else f"缺少私區來源: {miss_str}"
-
-            self.one_done.emit({"ip": ip, "room": room, "status": status, "detail": detail, "code": code})
-            done += 1
-            self.progress.emit(done, total)
+            for fut in as_completed(tasks):
+                info = fut.result()
+                self.one_done.emit(info)
+                done += 1
+                self.progress.emit(done, total)
 
         self.all_done.emit()
+
+# =========================
+# 啟動密碼對話框
+# =========================
+class PasswordDialog(QDialog):
+    def __init__(self, expected_password, parent=None):
+        super().__init__(parent)
+        self.expected = str(expected_password)
+        self.tries_left = 3
+        self.setWindowTitle("密碼驗證")
+        self.setModal(True)
+        lay = QVBoxLayout(self)
+        self.label = QLabel("請輸入密碼以使用本程式：")
+        lay.addWidget(self.label)
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.Password)
+        self.edit.returnPressed.connect(self.try_accept)
+        lay.addWidget(self.edit)
+        row = QHBoxLayout()
+        self.btn_ok = QPushButton("確定")
+        self.btn_ok.clicked.connect(self.try_accept)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        row.addStretch()
+        row.addWidget(self.btn_ok)
+        row.addWidget(self.btn_cancel)
+        lay.addLayout(row)
+        self.setFixedWidth(360)
+
+    def try_accept(self):
+        text = self.edit.text()
+        if text == self.expected:
+            self.accept()
+            return
+        self.tries_left -= 1
+        if self.tries_left <= 0:
+            QMessageBox.critical(self, "密碼錯誤", "嘗試次數已用完，程式將關閉。")
+            self.reject()
+            return
+        QMessageBox.warning(self, "密碼錯誤", f"密碼不正確，還可再嘗試 {self.tries_left} 次。")
+        self.edit.clear()
+        self.edit.setFocus()
 
 # =========================
 # 主視窗
@@ -390,85 +471,124 @@ class DeployWorker(QThread):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("監視列表下發工具_V1.0_By Dean")
-        self.resize(1180, 1020)
+        self.setWindowTitle("設備清單管理工具")
+        self.resize(1200, 1080)
         icon_path = get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         self.devices = []             # 主清單（匯入 + 手動）
-        self.public_devices = []      # 公區來源（手動從主清單加入）
+        self.public_devices = []      # 公區來源（可含 voip 與 rtsp）
         self.to_be_sent_devices = []  # 目標室內機（手動從主清單加入）
-        self.original_order = []      # 原始排序（僅使用匯入後的原始資料，確保名稱以匯入為準）
+        self.original_order = []      # 原始排序（匯入後記錄；手動新增也追記）
         self.worker = None
 
         self.init_ui()
+
+    def _unify_btn_height(self, *btns):
+        for b in btns:
+            if isinstance(b, QPushButton):
+                b.setFixedHeight(BTN_H)
 
     # ---------- UI ----------
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # 匯入 & 基本操作
+        # ===== 匯入 & 基本操作（頂部） =====
         top = QHBoxLayout()
         self.import_btn = QPushButton("匯入Excel"); self.import_btn.clicked.connect(self.import_excel); top.addWidget(self.import_btn)
         top.addWidget(QLabel("手動輸入IP:"))
         self.manual_ip = QLineEdit(); self.manual_ip.setPlaceholderText("192.168.1.10"); self.manual_ip.returnPressed.connect(self.add_manual_ip); top.addWidget(self.manual_ip)
         btn_add = QPushButton("新增"); btn_add.clicked.connect(self.add_manual_ip); top.addWidget(btn_add)
         top.addStretch()
-        btn_all = QPushButton("全選"); btn_all.clicked.connect(lambda: self.table.select_all(True, True)); top.addWidget(btn_all)
-        btn_none = QPushButton("全不選"); btn_none.clicked.connect(lambda: self.table.select_all(False, True)); top.addWidget(btn_none)
         btn_clear = QPushButton("清除資料"); btn_clear.clicked.connect(self.clear_all); top.addWidget(btn_clear)
+        self._unify_btn_height(self.import_btn, btn_add, btn_clear)
         layout.addLayout(top)
 
         # 搜尋
         prm = QHBoxLayout()
         prm.addWidget(QLabel("搜尋:"))
-        self.search_edit = QLineEdit(); self.search_edit.textChanged.connect(self.search_devices); prm.addWidget(self.search_edit)
+        self.search_edit = QLineEdit()
+        self.search_edit.textChanged.connect(self.search_devices)
+        prm.addWidget(self.search_edit)
         layout.addLayout(prm)
 
-        # 主清單
+        # ===== 全部設備清單 =====
         layout.addWidget(QLabel("全部設備清單（點整列切換勾選；可框選多列後按空白鍵批次切換）"))
-        self.table = DeviceTable()
+        self.table = DeviceTable(columns=FIXED_COLUMNS)
         layout.addWidget(self.table)
 
-        # 加入公區 / 加入待下發
+        # 全部設備清單下方操作列（同一高度；全選/全不選置右）
         ops = QHBoxLayout()
         btn_pub = QPushButton("加入公區"); btn_pub.clicked.connect(self.add_to_public); ops.addWidget(btn_pub)
         btn_send = QPushButton("加入待下發"); btn_send.clicked.connect(self.add_to_send); ops.addWidget(btn_send)
         ops.addStretch()
+        btn_all = QPushButton("全選(可見)"); btn_all.clicked.connect(lambda: self.table.select_all(True, True)); ops.addWidget(btn_all)
+        btn_none = QPushButton("全不選(可見)"); btn_none.clicked.connect(lambda: self.table.select_all(False, True)); ops.addWidget(btn_none)
+        self._unify_btn_height(btn_pub, btn_send, btn_all, btn_none)
         layout.addLayout(ops)
 
-        # 公區來源
-        layout.addWidget(QLabel("公區來源清單（可刪除，刪除後回主清單並恢復原排序）"))
-        self.public_table = DeviceTable()
-        self.public_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        layout.addWidget(self.public_table)
-        pub_ops = QHBoxLayout()
-        btn_del_pub = QPushButton("刪除選取公區來源"); btn_del_pub.clicked.connect(self.delete_selected_public); pub_ops.addWidget(btn_del_pub)
-        pub_ops.addStretch(); layout.addLayout(pub_ops)
-
-        # 待下發目標
-        layout.addWidget(QLabel("待下發目標清單（可刪除，刪除後回主清單並恢復原排序）"))
-        self.send_table = DeviceTable()
+        # ===== 待下發目標（第二個列表） =====
+        layout.addWidget(QLabel("待下發目標清單（只允許『室內機 / 管理台』（非手動）；手動建立不受限）"))
+        self.send_table = DeviceTable(columns=FIXED_COLUMNS)
         self.send_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.send_table)
+
         send_ops = QHBoxLayout()
         btn_del_send = QPushButton("刪除選取目標"); btn_del_send.clicked.connect(self.delete_selected_send); send_ops.addWidget(btn_del_send)
-        send_ops.addStretch(); layout.addLayout(send_ops)
+        send_ops.addStretch()
+        btn_send_all = QPushButton("下發全選(可見)"); btn_send_all.clicked.connect(lambda: self.send_table.select_all(True, True)); send_ops.addWidget(btn_send_all)
+        btn_send_none = QPushButton("下發全不選(可見)"); btn_send_none.clicked.connect(lambda: self.send_table.select_all(False, True)); send_ops.addWidget(btn_send_none)
+        self._unify_btn_height(btn_del_send, btn_send_all, btn_send_none)
+        layout.addLayout(send_ops)
 
-        # 私區 02–10 選擇（可為空）
+        # ===== 公區來源（第三個列表） =====
+        layout.addWidget(QLabel("公區來源清單（可刪除，刪除後回主清單並恢復原排序）"))
+        self.public_table = DeviceTable(columns=FIXED_COLUMNS)
+        self.public_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        layout.addWidget(self.public_table)
+
+        pub_ops = QHBoxLayout()
+        btn_del_pub = QPushButton("刪除選取公區來源"); btn_del_pub.clicked.connect(self.delete_selected_public); pub_ops.addWidget(btn_del_pub)
+        pub_ops.addStretch()
+        btn_pub_all = QPushButton("公區全選(可見)"); btn_pub_all.clicked.connect(lambda: self.public_table.select_all(True, True)); pub_ops.addWidget(btn_pub_all)
+        btn_pub_none = QPushButton("公區全不選(可見)"); btn_pub_none.clicked.connect(lambda: self.public_table.select_all(False, True)); pub_ops.addWidget(btn_pub_none)
+        self._unify_btn_height(btn_del_pub, btn_pub_all, btn_pub_none)
+        layout.addLayout(pub_ops)
+
+        # ➕ 新增 RTSP 公區來源（名稱自訂 + rtsp URL）
+        rtsp_row = QHBoxLayout()
+        rtsp_row.addWidget(QLabel("新增 RTSP 公區來源：名稱"))
+        self.rtsp_name = QLineEdit(); self.rtsp_name.setPlaceholderText("例如：中庭"); rtsp_row.addWidget(self.rtsp_name)
+        rtsp_row.addWidget(QLabel("RTSP URL"))
+        self.rtsp_url = QLineEdit(); self.rtsp_url.setPlaceholderText("rtsp://<ip or host>/path"); rtsp_row.addWidget(self.rtsp_url)
+        btn_add_rtsp = QPushButton("加入公區 (RTSP)")
+        btn_add_rtsp.clicked.connect(self.add_public_rtsp)
+        rtsp_row.addWidget(btn_add_rtsp)
+        self._unify_btn_height(btn_add_rtsp)
+        layout.addLayout(rtsp_row)
+
+        # ===== 私區（放在公區清單列表下面）+ 文字方塊顯示目前選擇 =====
         priv_h = QHBoxLayout()
         priv_h.addWidget(QLabel("私區小門口機(可多選 02–10；可留空)："))
         self.private_list = QListWidget()
         self.private_list.setSelectionMode(QAbstractItemView.MultiSelection)
         for i in range(2, 11):
             self.private_list.addItem(QListWidgetItem(f"{i:02d}"))
-        self.private_list.setMaximumHeight(80)
-        self.private_list.setMaximumWidth(150)
+        self.private_list.setMaximumHeight(100)
+        self.private_list.setMaximumWidth(160)
+        self.private_list.itemSelectionChanged.connect(self._update_private_selected_text)
         priv_h.addWidget(self.private_list)
+        priv_h.addWidget(QLabel("目前選擇："))
+        self.private_selected_text = QLineEdit()
+        self.private_selected_text.setReadOnly(True)
+        self.private_selected_text.setPlaceholderText("(尚未選擇)")
+        self.private_selected_text.setMinimumWidth(240)
+        priv_h.addWidget(self.private_selected_text)
         priv_h.addStretch()
-        self.deploy_btn = QPushButton("下發監視列表")
+        self.deploy_btn = QPushButton("下發監視列表（正式）")
         self.deploy_btn.clicked.connect(self.deploy_monitor_list)
+        self._unify_btn_height(self.deploy_btn)
         priv_h.addWidget(self.deploy_btn)
         layout.addLayout(priv_h)
 
@@ -506,11 +626,12 @@ class MainWindow(QWidget):
         if not is_valid_ip(ip):
             QMessageBox.warning(self, "格式錯誤", "請輸入正確的IPv4位址")
             return
-        keys = self.table.data_keys or ["選取", "設備類型", "名稱", "IP", "房號"]
-        rec = {k: "" for k in keys}
-        rec["IP"] = ip; rec["選取"] = False
+        rec = {k: "" for k in FIXED_COLUMNS}
+        rec["IP"] = ip
+        rec["選取"] = False
+        rec["_manual"] = True  # 標記手動建立 → 加入待下發不受限
         for d in (self.devices + self.public_devices + self.to_be_sent_devices):
-            if d.get("IP", "") == ip:
+            if d.get("IP", "") == ip and ip != "":
                 QMessageBox.information(self, "已存在", "此IP已在清單中")
                 return
         self.devices.append(rec)
@@ -519,6 +640,31 @@ class MainWindow(QWidget):
         self.manual_ip.clear()
         self.status_label.setText("手動新增成功")
         self.search_devices()
+
+    def add_public_rtsp(self):
+        name = self.rtsp_name.text().strip()
+        url = self.rtsp_url.text().strip()
+        if not name:
+            QMessageBox.warning(self, "缺少名稱", "請輸入 RTSP 名稱")
+            return
+        if not url.lower().startswith("rtsp://"):
+            QMessageBox.warning(self, "URL 格式錯誤", "RTSP URL 需以 rtsp:// 開頭")
+            return
+        # 公區清單新增一筆 RTSP 來源（不回主清單）
+        item = {
+            "選取": False,
+            "設備類型": "RTSP",
+            "名稱": name,
+            "IP": "",       # RTSP 不需要 IP/房號
+            "房號": "",
+            "type": "rtsp",
+            "url": url
+        }
+        self.public_devices.append(item)
+        self.public_table.populate(self.public_devices)
+        self.rtsp_name.clear()
+        self.rtsp_url.clear()
+        self.status_label.setText("已新增 RTSP 公區來源")
 
     def search_devices(self):
         self.table.filter(self.search_edit.text())
@@ -537,17 +683,36 @@ class MainWindow(QWidget):
 
     @staticmethod
     def _unique_extend(dst_list, add_list):
-        added = set(d.get("IP", "") for d in dst_list)
-        new_items = [d for d in add_list if d.get("IP", "") not in added]
+        added = set(d.get("IP", "") for d in dst_list if d.get("IP"))
+        new_items = []
+        for d in add_list:
+            ip = d.get("IP", "")
+            if ip and ip in added:
+                continue
+            new_items.append(d)
+            if ip:
+                added.add(ip)
         dst_list.extend(new_items)
         return new_items
 
+    def _find_in_list_by_ip(self, ip, data_list):
+        for d in data_list:
+            if d.get("IP", "") == ip:
+                return d
+        return None
+
     def _take_selected_from_main(self):
-        sel = self.table.get_selected_devices()
-        if not sel:
+        """回傳主清單中被勾選的原始記錄（保留隱藏欄位如 _manual）。"""
+        picked = []
+        basic = self.table.get_selected_devices()
+        if not basic:
             QMessageBox.information(self, "未選擇", "請至少勾選一個設備")
             return []
-        return sel
+        for b in basic:
+            ip = b.get("IP", "")
+            src = self._find_in_list_by_ip(ip, self.devices)
+            picked.append(src.copy() if src else b)
+        return picked
 
     def _remove_from_main_by_ips(self, ips):
         self.devices = [d for d in self.devices if d.get("IP", "") not in ips]
@@ -568,45 +733,96 @@ class MainWindow(QWidget):
         return sorted_list
 
     # ---- 加入各清單 ----
+    def _allowed_for_send(self, rec):
+        """非手動建立 → 只允許『室內(機) / 管理台』"""
+        if rec.get("_manual"):
+            return True
+        t = str(rec.get("設備類型") or "")
+        return ("室內" in t) or ("室內機" in t) or ("管理台" in t) or ("管理臺" in t)
+
+    def _allowed_for_public(self, rec):
+        """公區禁止：室內機 / 小門口機"""
+        t = str(rec.get("設備類型") or "")
+        forbid = ("室內" in t) or ("室內機" in t) or ("小門口" in t) or ("小門口機" in t) or ("管理台" in t) or ("管理臺" in t)
+        return not forbid
+
     def add_to_public(self):
         sel = self._take_selected_from_main()
         if not sel: return
-        new_items = self._unique_extend(self.public_devices, sel)
+        allowed = [d for d in sel if self._allowed_for_public(d)]
+        blocked = [d for d in sel if d not in allowed]
+        if blocked:
+            bips = ", ".join([d.get("名稱","") or "(無IP)" for d in blocked][:5])
+            QMessageBox.information(self, "選擇設備類型錯誤",
+                                    f"以下設備類型為『室內機/小門口機/管理台』，不可加入公區：\n{bips}"
+                                    + ("\n…等" if len(blocked) > 5 else ""))
+        if not allowed:
+            return
+        new_items = self._unique_extend(self.public_devices, allowed)
         if not new_items:
             QMessageBox.information(self, "重複", "勾選設備都已在公區清單中"); return
         self.public_table.populate(self.public_devices)
-        self._remove_from_main_by_ips([d.get("IP","") for d in new_items])
+        self._remove_from_main_by_ips([d.get("IP","") for d in new_items if d.get("IP")])
         self.status_label.setText(f"已加入 {len(new_items)} 筆到公區來源")
+        # 搜尋完成並做了移動後自動清空搜尋欄
+        self.search_edit.clear()
+        self.table.filter("")
 
     def add_to_send(self):
         sel = self._take_selected_from_main()
         if not sel: return
-        new_items = self._unique_extend(self.to_be_sent_devices, sel)
+        allowed = [d for d in sel if self._allowed_for_send(d)]
+        blocked = [d for d in sel if d not in allowed]
+        if blocked:
+            bips = ", ".join([d.get("名稱","") or "(無IP)" for d in blocked][:5])
+            QMessageBox.information(self, "選擇設備類型錯誤",
+                                    f"以下設備類型非『室內機/管理台』且非手動建立，已略過：\n{bips}"
+                                    + ("\n…等" if len(blocked) > 5 else ""))
+        if not allowed:
+            return
+        new_items = self._unique_extend(self.to_be_sent_devices, allowed)
         if not new_items:
             QMessageBox.information(self, "重複", "勾選設備都已在待下發清單中"); return
         self.send_table.populate(self.to_be_sent_devices)
-        self._remove_from_main_by_ips([d.get("IP","") for d in new_items])
+        self._remove_from_main_by_ips([d.get("IP","") for d in new_items if d.get("IP")])
         self.status_label.setText(f"已加入 {len(new_items)} 筆到待下發")
+        # 搜尋完成並做了移動後自動清空搜尋欄
+        self.search_edit.clear()
+        self.table.filter("")
 
     # ---- 刪除回主清單（恢復原排序）----
     def _delete_from_table(self, data_list, table):
-        rows = sorted(set(i.row() for i in table.selectedIndexes()), reverse=True)
+        # 先以「選取」勾選為準；若無勾選，才退回使用列選取
+        rows = table.get_checked_row_indexes()
         if not rows:
-            QMessageBox.information(self, "未選擇", "請選取要刪除的設備")
+            rows = sorted(set(i.row() for i in table.selectedIndexes()))
+        rows = sorted(set(rows), reverse=True)
+        if not rows:
+            QMessageBox.information(self, "未選擇", "請在清單的『選取』欄勾選要刪除的設備")
             return
+
         restored = []
         for r in rows:
+            if r < 0 or r >= len(data_list):
+                continue
             d = data_list[r]
-            restored.append(d)
+            # 只有有 IP 的（voip 來源）才回主清單；RTSP 是手動來源不回主清單
+            if d.get("IP"):
+                restored.append(d)
             del data_list[r]
             table.removeRow(r)
+
+        # 回主清單（避免重複）
         main_ips = set(d.get("IP","") for d in self.devices)
         for d in restored:
             if d.get("IP","") not in main_ips:
                 self.devices.append(d)
+
         # 回主清單後按原排序還原
         self.devices = self.sort_by_original_order(self.devices)
         self.table.populate(self.devices)
+        self.public_table.populate(self.public_devices)
+        self.send_table.populate(self.to_be_sent_devices)
         self.status_label.setText("已刪除並回到主清單（順序已還原）")
 
     def delete_selected_public(self):
@@ -614,6 +830,11 @@ class MainWindow(QWidget):
 
     def delete_selected_send(self):
         self._delete_from_table(self.to_be_sent_devices, self.send_table)
+
+    # ---------- 私區選擇顯示 ----------
+    def _update_private_selected_text(self):
+        codes = [it.text() for it in self.private_list.selectedItems()]
+        self.private_selected_text.setText(", ".join(sorted(codes)) if codes else "")
 
     # ---------- 下發 ----------
     def _clear_results(self):
@@ -626,12 +847,12 @@ class MainWindow(QWidget):
         self.result_table.setItem(r, 1, QTableWidgetItem(room))
         self.result_table.setItem(r, 2, QTableWidgetItem(status))
         self.result_table.setItem(r, 3, QTableWidgetItem(detail))
+        self.result_table.scrollToBottom()
 
     def _build_all_by_room(self):
         """
         建立 {房號: record} 索引。
-        **只使用 original_order（匯入時的原始資料）**，確保名稱完全以匯入為準，
-        避免被後續加入/刪除時的物件覆寫。
+        只使用 original_order（匯入時的原始資料），確保名稱以匯入為準。
         """
         by_room = {}
         for d in self.original_order:
@@ -641,9 +862,43 @@ class MainWindow(QWidget):
                 by_room[room] = d
         return by_room
 
+    def _preview_public_and_private(self):
+        # 公區預覽
+        voip_items = []
+        rtsp_items = []
+        for d in self.public_devices:
+            t = str(d.get("type", "")).lower()
+            if t == "rtsp" or d.get("設備類型") == "RTSP":
+                name = str(d.get("名稱") or d.get("name") or "").strip()
+                url = str(d.get("url") or "").strip()
+                rtsp_items.append(f"RTSP：{name} [{url}]")
+            else:
+                name = str(d.get("名稱") or "").strip()
+                ip = (d.get("IP") or "").strip()
+                room = (d.get("房號") or "").strip()
+                if ip or room or name:
+                    voip_items.append(f"VOIP：{name} [{room}@{ip}]")
+        pub_lines = voip_items + rtsp_items
+        pub_text = "\n".join(pub_lines) if pub_lines else "(空)"
+
+        # 私區預覽
+        private_codes = [it.text() for it in self.private_list.selectedItems()]
+        priv_text = ", ".join(sorted(private_codes)) if private_codes else "(空)"
+
+        targets = len(self.to_be_sent_devices)
+
+        msg = f"即將下發監視列表\n\n目標台數：{targets}\n\n【公區】\n{pub_text}\n\n【私區】\n{priv_text}\n\n是否繼續？"
+        return msg
+
     def deploy_monitor_list(self):
         if not self.to_be_sent_devices:
             QMessageBox.information(self, "無目標", "請先加入『待下發』清單。")
+            return
+
+        # 下發前提示目前公區與私區內容
+        preview = self._preview_public_and_private()
+        ans = QMessageBox.question(self, "下發確認", preview, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ans != QMessageBox.Yes:
             return
 
         # 公區可空、私區可空（空就送空陣列以清空設備）
@@ -660,7 +915,8 @@ class MainWindow(QWidget):
             public_src=self.public_devices,
             private_codes=private_codes,
             all_by_room=all_by_room,
-            timeout=6
+            timeout=6,
+            max_workers=DEPLOY_MAX_WORKERS
         )
         self.worker.one_done.connect(lambda info: self._append_result(info.get("ip",""), info.get("room",""), info.get("status",""), info.get("detail","")))
         self.worker.progress.connect(lambda done, total: self.progress.setValue(int(done*100/max(total,1))))
@@ -678,6 +934,12 @@ if __name__ == "__main__":
     icon = get_icon_path()
     if os.path.exists(icon):
         app.setWindowIcon(QIcon(icon))
+
+    # 啟動前先驗證密碼
+    dlg = PasswordDialog(APP_PASSWORD)
+    if dlg.exec_() != QDialog.Accepted:
+        sys.exit(0)
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
