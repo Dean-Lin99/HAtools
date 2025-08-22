@@ -464,7 +464,7 @@ class DeployWorker(QThread):
         self.all_done.emit()
 
 # =========================
-# 密碼對話框（含避免雙重觸發扣次）
+# 密碼對話框（修正：避免雙重觸發扣次）
 # =========================
 class PasswordDialog(QDialog):
     def __init__(self, expected_password, parent=None):
@@ -483,10 +483,10 @@ class PasswordDialog(QDialog):
         self.edit.setToolTip("輸入啟動此工具的密碼")
         self.edit.setClearButtonEnabled(True)
 
+        # Enter 統一視為按下「確定」按鈕
         self.btn_ok = QPushButton("確定")
         self.btn_ok.setAutoDefault(True)
         self.btn_ok.setDefault(True)
-        # Enter 統一視為按下「確定」按鈕
         self.edit.returnPressed.connect(self.btn_ok.click)
 
         lay.addWidget(self.edit)
@@ -509,6 +509,7 @@ class PasswordDialog(QDialog):
             if text == self.expected:
                 self.accept()
                 return
+            # 錯誤才扣次
             self.tries_left -= 1
             if self.tries_left <= 0:
                 QMessageBox.critical(self, "密碼錯誤", "嘗試次數已用完，程式將關閉。")
@@ -657,10 +658,15 @@ class MainWindow(QMainWindow):
 
         btn_add = QPushButton("新增 IP")
         btn_add.clicked.connect(self.add_manual_ip)
+
         btn_import = QPushButton("匯入 Excel")
         btn_import.clicked.connect(self.import_excel)
 
-        for w in (self.search_edit, self.manual_ip, btn_add, btn_import):
+        # 清除資料按鈕
+        btn_clear = QPushButton("清除資料")
+        btn_clear.clicked.connect(self.clear_all)
+
+        for w in (self.search_edit, self.manual_ip, btn_add, btn_import, btn_clear):
             if isinstance(w, (QLineEdit, QPushButton)):
                 w.setFixedHeight(BTN_H)
 
@@ -676,6 +682,7 @@ class MainWindow(QMainWindow):
         h.setSpacing(8)
         h.addWidget(btn_add)
         h.addWidget(btn_import)
+        h.addWidget(btn_clear)
         h.addStretch()
         grid.addWidget(btn_bar, 1, 2)
 
@@ -763,7 +770,7 @@ class MainWindow(QMainWindow):
         mid_l.addWidget(gb_pub)
         right.addWidget(mid_w)
 
-        # 右下：私區 + 下發/匯出
+        # 右下：私區 + 下發/匯出（兩顆等寬按鈕 + 進度）
         bottom_w = QWidget()
         bottom_l = QVBoxLayout(bottom_w); bottom_l.setSpacing(8)
         gb_priv = QGroupBox("私區小門口機（可多選 02–10或留空）")
@@ -781,6 +788,22 @@ class MainWindow(QMainWindow):
         self.private_list.setMaximumHeight(130)
         self.private_list.setMaximumWidth(200)
         self.private_list.itemSelectionChanged.connect(self._update_private_selected_text)
+
+        # 私區選擇顏色：與主要清單一致（藍色）
+        self.private_list.setStyleSheet("""
+            QListWidget {
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                selection-background-color: #dbeafe;
+                selection-color: #111827;
+            }
+            QListWidget::item { padding: 4px 6px; }
+            QListWidget::item:selected { background: #dbeafe; color: #111827; }
+            QListWidget::item:selected:active { background: #dbeafe; color: #111827; }
+            QListWidget::item:selected:!active { background: #dbeafe; color: #111827; }
+        """)
+
         left_priv.addWidget(self.private_list)
         priv_line.addLayout(left_priv)
 
@@ -815,14 +838,14 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
 
-        # ==== 單一進度條：綠色漸層樣式（只影響 self.progress）====
+        # 單一進度條：綠色漸層 + 白色底色
         self.progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #e5e7eb;
                 border-radius: 6px;
                 text-align: center;
                 height: 20px;
-                background-color: #f0fdf4; /* 未填滿底色：綠系淺色 */
+                background-color: #ffffff; /* 未填滿底色：白色 */
             }
             QProgressBar::chunk {
                 border-radius: 6px;
@@ -831,8 +854,6 @@ class MainWindow(QMainWindow):
                                             stop:1 #22c55e);  /* green-500 */
             }
         """)
-        # =====================================================
-
         pr_line.addWidget(self.progress, 1)
         right_col.addLayout(pr_line)
 
