@@ -527,7 +527,7 @@ class PasswordDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("監視列表下發工具V1.0_By Dean")
+        self.setWindowTitle("監視列表下發工具_V1.0_By Dean")
         self.resize(1320, 900)
 
         icon_path = get_icon_path()
