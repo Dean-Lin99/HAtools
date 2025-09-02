@@ -973,7 +973,7 @@ class UpdateWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("設備韌體更新工具（極簡設定 + 下載進度）")
+        self.setWindowTitle("設備更新工具")
         self.resize(1400, 960)
 
         self.devices = []
@@ -1013,7 +1013,7 @@ class MainWindow(QMainWindow):
         top_l.addLayout(row1)
 
         # 伺服器（極簡）
-        gb_srv = QGroupBox("內建檔案伺服器（極簡設定）")
+        gb_srv = QGroupBox("檔案伺服器")
         f = QFormLayout(gb_srv)
 
         self.le_public_host = QLineEdit()
@@ -1023,12 +1023,12 @@ class MainWindow(QMainWindow):
         self.btn_srv_toggle = QPushButton("啟動伺服器")
         self.btn_srv_toggle.clicked.connect(self.on_toggle_server)
 
-        f.addRow("Server Host（你的本機 IP）：", self.le_public_host)
+        f.addRow("Server Host（本機 IP）：", self.le_public_host)
         f.addRow("File Server Port：", self.le_srv_port)
         f.addRow(self.btn_srv_toggle)
 
         # 韌體清單
-        gb_fw = QGroupBox("韌體清單（多檔；可為每檔設定匹配關鍵字與 Content-Type 覆寫）")
+        gb_fw = QGroupBox("韌體清單")
         vfw = QVBoxLayout(gb_fw)
         btns = QHBoxLayout()
         btn_add_fw = QPushButton("加入韌體檔")
@@ -1096,7 +1096,7 @@ class MainWindow(QMainWindow):
         b_l = QVBoxLayout(bottom)
         b_l.setSpacing(8)
         run_row = QHBoxLayout()
-        self.btn_start = QPushButton("開始更新（自動啟動/健康檢查/快速探測）")
+        self.btn_start = QPushButton("開始更新")
         self.btn_start.clicked.connect(self.start_update)
         self.btn_export = QPushButton("匯出結果 CSV")
         self.btn_export.clicked.connect(self.export_results)
@@ -1121,7 +1121,7 @@ class MainWindow(QMainWindow):
         b_l.addWidget(self.tbl_res, 1)
 
         # 下載進度監看
-        gb_dl = QGroupBox("下載進度（設備向內建檔案伺服器下載韌體）")
+        gb_dl = QGroupBox("下載進度")
         vdl = QVBoxLayout(gb_dl)
         self.tbl_dl = QTableWidget(0, 5)
         self.tbl_dl.setHorizontalHeaderLabels(["IP", "檔名", "傳輸量", "進度", "狀態"])
@@ -1214,7 +1214,7 @@ class MainWindow(QMainWindow):
 
     # === 加入/刪除/設預設 ===
     def on_add_fw(self):
-        path, _ = QFileDialog.getOpenFileName(self, "選擇韌體檔", "", "韌體檔 (*.pkg *.apk *.bin *.zip);;所有檔案 (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "選擇韌體檔", "", "韌體檔 (*.pkg *.apk);;所有檔案 (*.*)")
         if not path:
             return
         if not os.path.isfile(path):
